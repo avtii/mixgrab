@@ -9,7 +9,7 @@ COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY mixgrab ./mixgrab
-RUN pip install --no-cache-dir ".[web]" "yt-dlp[default]" \
+RUN pip install --no-cache-dir ".[web]" "yt-dlp[default]" bgutil-ytdlp-pot-provider \
  && useradd --create-home --uid 1000 mixgrab \
  && mkdir -p /data && chown mixgrab /data
 

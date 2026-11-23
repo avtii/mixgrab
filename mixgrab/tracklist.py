@@ -131,6 +131,15 @@ if not shutil.which("deno") and shutil.which("node"):
     YDL_EXTRA["js_runtimes"] = {"node": {}}   # YouTube needs a JS runtime; yt-dlp only enables deno by default
 
 
+def use_pot_provider(base_url: str | None) -> None:
+    """Get YouTube proof-of-origin tokens from a bgutil provider server, so servers pass the bot check
+    without cookies (needs the bgutil-ytdlp-pot-provider yt-dlp plugin)."""
+    if base_url:
+        YDL_EXTRA["extractor_args"] = {"youtubepot-bgutilhttp": {"base_url": [base_url]}}
+    else:
+        YDL_EXTRA.pop("extractor_args", None)
+
+
 def use_cookies(file: str | None = None, browser: str | None = None) -> None:
     """Send YouTube cookies with every yt-dlp call: a cookies.txt file, or read live from a browser."""
     YDL_EXTRA.pop("cookiefile", None)
@@ -149,6 +158,8 @@ def is_bot_check(e: BaseException) -> bool:
 def _ydl(extra: dict) -> yt_dlp.YoutubeDL:
     opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noprogress": True}
     opts.update(YDL_EXTRA)
+    if "extractor_args" in extra and "extractor_args" in YDL_EXTRA:   # keep e.g. the PO-token provider setting
+        extra = {**extra, "extractor_args": {**YDL_EXTRA["extractor_args"], **extra["extractor_args"]}}
     opts.update(extra)
     return yt_dlp.YoutubeDL(opts)
 

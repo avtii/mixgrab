@@ -9,6 +9,7 @@ services:
     environment:
       MIXGRAB_DATA: /data
       YTDLP_COOKIES: ${YTDLP_COOKIES:-}
+      POT_URL: http://mixgrab-pot:4416   # YouTube PO tokens, so no cookies are needed
     volumes:
       - ./data:/data
     ports:
@@ -16,6 +17,16 @@ services:
       - "61235:61235"        # Soulseek obfuscated port
     networks: [burrball_default]
     mem_limit: 1500m
+    depends_on: [mixgrab-pot]
+
+  # Mints YouTube proof-of-origin tokens for yt-dlp (bgutil-ytdlp-pot-provider). Internal only, no ports.
+  mixgrab-pot:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    container_name: mixgrab-pot
+    restart: unless-stopped
+    init: true
+    networks: [burrball_default]
+    mem_limit: 512m
 
 networks:
   burrball_default:

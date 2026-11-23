@@ -53,6 +53,8 @@ LINK_TTL_MIN = _env("LINK_TTL_MIN", 60 * 24, int)     # signed file links expire
 YTDLP_COOKIES = _env("YTDLP_COOKIES")                 # optional cookies.txt for YouTube
 # where the uploaded YouTube cookies live (YouTube bot-checks datacenter IPs without them)
 COOKIES_FILE = Path(YTDLP_COOKIES) if YTDLP_COOKIES else DATA / "youtube-cookies.txt"
+# bgutil PO-token provider (sidecar): lets yt-dlp pass YouTube's bot check without cookies
+POT_URL = _env("POT_URL")
 
 MATCH = {
     "prefer_lossless": _env("PREFER_LOSSLESS", "1") == "1",

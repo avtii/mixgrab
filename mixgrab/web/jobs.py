@@ -98,6 +98,7 @@ class Manager:
         self.slsk_error = ""
         self._dirty: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
+        tlmod.use_pot_provider(S.POT_URL)
         self.apply_cookies()
 
     def apply_cookies(self):

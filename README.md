@@ -165,7 +165,7 @@ MIXGRAB_PASSWORD='a-long-password' mixgrab-web      # http://localhost:8080
 
 The web app and the CLI share `mixgrab/engine.py`. Soulseek allows one session per account, so the web app keeps a single Soulseek connection and runs every job through it.
 
-If the server is in a data center, YouTube will usually ask for a sign-in. Use **Add YouTube cookies** in the sidebar to upload a `cookies.txt`, then press **Resume** on the failed job.
+YouTube bot-checks servers in data centers. The Docker deploy handles this without cookies: it runs a small [bgutil PO-token provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) container (`mixgrab-pot`), and yt-dlp uses it to prove each request comes from a real player. If YouTube still asks for a sign-in, use **Add YouTube cookies** in the sidebar to upload a `cookies.txt`, then press **Resume** on the failed job.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -178,6 +178,7 @@ If the server is in a data center, YouTube will usually ask for a sign-in. Use *
 | `LINK_TTL_MIN` | 1440 | how long a file link stays valid |
 | `CONVERT_MP3` / `MP3_BITRATE` | 1 / 320 | MP3 copies |
 | `YOUTUBE_FALLBACK` / `YOUTUBE_QUALITY` | 1 / 0 | YouTube fallback |
+| `POT_URL` | (none; `http://mixgrab-pot:4416` in the compose file) | bgutil PO-token provider, so YouTube needs no cookies |
 | `YTDLP_COOKIES` | (none) | fixed cookies.txt path, instead of uploading one |
 | `AUDD_TOKEN`, `ACR_HOST`, `ACR_ACCESS_KEY`, `ACR_ACCESS_SECRET` | (none) | extra audio recognizers |
 
