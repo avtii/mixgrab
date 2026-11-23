@@ -57,11 +57,8 @@ def download_audio(url: str, work_dir: str, progress=lambda done, total: None) -
             "outtmpl": os.path.join(work_dir, "mixaudio.%(ext)s"), "noplaylist": True,
             "progress_hooks": [lambda d: progress(d.get("downloaded_bytes") or 0,
                                                   d.get("total_bytes") or d.get("total_bytes_estimate") or 0)]}
-    from .tracklist import YDL_EXTRA
-    opts.update(YDL_EXTRA)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info)
+    from .tracklist import run_ydl
+    return run_ydl(opts, lambda ydl: ydl.prepare_filename(ydl.extract_info(url, download=True)))
 
 
 def clip(ffmpeg: str, src: str, at: int) -> bytes:

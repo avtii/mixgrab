@@ -205,8 +205,37 @@ def is_bot_check(e: BaseException) -> bool:
     return "confirm you" in s and "bot" in s
 
 
+def no_formats(e: BaseException) -> bool:
+    """YouTube offered no audio/video (e.g. the signed-in account is in the SABR-only streaming experiment)."""
+    s = str(e)
+    return "Requested format is not available" in s or "Only images are available" in s
+
+
+def run_ydl(opts: dict, fn):
+    """Run fn(YoutubeDL) with opts + YDL_EXTRA. If cookies leave YouTube offering only images (SABR-only
+    accounts), retry once without them; if that fails too, raise the original error."""
+    cookies = bool({"cookiefile", "cookiesfrombrowser"} & YDL_EXTRA.keys())
+    first = {**opts, **YDL_EXTRA}
+    if cookies and "logger" not in first:
+        first["logger"] = _QuietLog()     # a retry follows; the error still reaches us via the exception
+    try:
+        with yt_dlp.YoutubeDL(first) as y:
+            return fn(y)
+    except yt_dlp.utils.DownloadError as e:
+        if not no_formats(e) or not cookies:
+            raise
+        bare = {k: v for k, v in YDL_EXTRA.items() if k not in ("cookiefile", "cookiesfrombrowser")}
+        try:
+            with yt_dlp.YoutubeDL({**opts, **bare}) as y:
+                return fn(y)
+        except yt_dlp.utils.DownloadError:
+            raise e from None
+
+
 def _ydl(extra: dict) -> yt_dlp.YoutubeDL:
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noprogress": True}
+    # metadata only (title, chapters, description, comments): don't fail when YouTube offers no formats
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noprogress": True,
+            "ignore_no_formats_error": True}
     opts.update(YDL_EXTRA)
     if "extractor_args" in extra and "extractor_args" in YDL_EXTRA:   # keep e.g. the PO-token provider setting
         extra = {**extra, "extractor_args": {**YDL_EXTRA["extractor_args"], **extra["extractor_args"]}}
