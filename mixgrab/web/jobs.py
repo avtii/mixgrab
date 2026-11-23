@@ -90,6 +90,10 @@ class Manager:
                     if t["state"] not in ("done", "missing", "expired"):
                         t["state"], t["note"] = "pending", ""
             self.jobs[j["id"]] = j
+        for d in S.WORK.iterdir():                  # identify scratch of jobs that can't resume any more
+            j = self.jobs.get(d.name)
+            if not j or j["tracks"] or j["status"] != "interrupted":
+                shutil.rmtree(d, ignore_errors=True)
         self.dl: Optional[Downloader] = None
         # the same engine the command-line tool runs on; one Soulseek login shared by all jobs
         self.engine = Engine({"soulseek": S.SLSK, "match": S.MATCH, "convert": S.CONVERT,
@@ -271,16 +275,17 @@ class Manager:
             prog["audio"] = [done, total]
             self.mark(job)
 
-        def on_clips(done, total, matches):
-            prog["clips"] = [done, total, matches]
+        def on_clips(done, total, matches, wait=0):
+            prog["clips"] = [done, total, matches, wait]
             self.mark(job)
 
-        try:
-            maybe = await identify_into(tl, job["url"], str(work), S.IDENTIFY, on_audio, on_clips)
-            job["found_in"] = tl.found_in
-            job["maybe"] = [{"at": h.at, "artist": h.artist, "title": h.title} for h in maybe]
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
+        maybe, complete = await identify_into(tl, job["url"], str(work), S.IDENTIFY, on_audio, on_clips)
+        job["found_in"] = tl.found_in
+        job["maybe"] = [{"at": h.at, "artist": h.artist, "title": h.title} for h in maybe]
+        # kept on failure or restart, so resuming the job continues the scan instead of starting over
+        shutil.rmtree(work, ignore_errors=True)
+        if not complete:
+            log.warning("job %s: Shazam rate limit, identification stopped early", job["id"])
 
     async def _download_all(self, job, only: Optional[list[dict]] = None):
         job["status"] = "downloading"
@@ -373,6 +378,7 @@ class Manager:
         self.jobs.pop(job["id"], None)
         self.store.delete_job(job["id"])
         shutil.rmtree(S.FILES / job["id"], ignore_errors=True)
+        shutil.rmtree(S.WORK / job["id"], ignore_errors=True)
         try:
             os.remove(S.ZIPS / f"{job['id']}.zip")
         except OSError:

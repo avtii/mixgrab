@@ -55,11 +55,14 @@ class IdentifyProgress:
         self.p.update(self.audio, completed=done, total=total or None,
                       info=f"{done / 1e6:.0f}/{total / 1e6:.0f} MB" if total else "")
 
-    def on_clips(self, done, total, matches):
+    def on_clips(self, done, total, matches, wait=0):
         if self.clips is None:
             self.p.update(self.audio, completed=1, total=1)
             self.clips = self.p.add_task("Identifying songs  ", total=total, info="")
-        self.p.update(self.clips, completed=done, info=f"{matches} matches")
+        info = f"{matches} matches"
+        if wait:
+            info += f" [yellow]· Shazam is rate-limiting, waiting {wait}s[/]"
+        self.p.update(self.clips, completed=done, total=total, info=info)
 
 
 STATE_STYLE = {

@@ -52,7 +52,7 @@ stall_timeout = 60          # give up on a transfer with no progress (s)
 
 [identify]
 auto = true                 # identify from audio when the tracklist is missing or incomplete
-step = 45                   # seconds between sampled clips
+step = 90                   # seconds between sampled clips (then in-between ones where songs change)
 min_hits = 2                # a song must match in this many clips to count
 max_avg_track_len = 600     # tracklist with fewer tracks than duration/this = incomplete
 # [convert]
@@ -192,11 +192,15 @@ async def run(args) -> int:
     ic = cfg["identify"]
     mode = "always" if args.identify else "never" if (args.no_identify or not ic.get("auto", True)) else "auto"
     why = None if args.tracklist else identify_reason(tl, mode, ic)
+    id_complete = True
     if why:
         console.print(f"[yellow]Identifying songs from the audio[/] [dim]({esc(why)})[/]")
         with IdentifyProgress() as ip:
-            maybe = await identify_into(tl, args.url, os.path.join(out_dir, ".identify"), ic,
-                                        ip.on_audio, ip.on_clips)
+            maybe, id_complete = await identify_into(tl, args.url, os.path.join(out_dir, ".identify"), ic,
+                                                     ip.on_audio, ip.on_clips)
+        if not id_complete:
+            console.print("[yellow]Shazam kept rate-limiting, so identification stopped early.[/] "
+                          "Run the same command again later: it carries on from where it stopped.")
         if maybe:
             console.print("[dim]Low-confidence (heard once, skipped):[/]")
             for h in maybe:
@@ -256,7 +260,7 @@ async def run(args) -> int:
             with console.status("Disconnecting…"):
                 await dl.__aexit__(None, None, None)
 
-    if not args.keep_audio:
+    if not args.keep_audio and id_complete:
         shutil.rmtree(os.path.join(out_dir, ".identify"), ignore_errors=True)
     missing = [t for t in tracks if not results[t.index].path]
     with open(os.path.join(out_dir, "playlist.m3u"), "w", encoding="utf-8") as f:

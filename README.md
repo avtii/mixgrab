@@ -120,8 +120,12 @@ Recent Chrome versions on Windows encrypt their cookies, so `--cookies-from-brow
    - **MixesDB**: searched by video ID, then by title words. A page that links to the video counts as verified.
    - **MusicBrainz**, for albums: it picks the release whose total length is closest to the video's.
 4. **Audio identification**, when there are still gaps:
-   - mixgrab downloads the mix audio and cuts a 12-second clip every 45 seconds;
+   - mixgrab downloads a small copy of the mix audio (about 45 MB for 2 hours) and cuts a 12-second clip every 90 seconds;
+   - it then adds a clip half-way wherever two neighbouring clips disagree or both found nothing, which is where songs change;
+   - parts that a timestamped tracklist already names are skipped;
    - each clip goes to Shazam, then to ACRCloud and AudD if you've added their keys to the config;
+   - Shazam requests are spaced out. If Shazam says "too many requests", mixgrab pauses and shows how long it is waiting;
+   - answers are saved as they come in, so running the same command again after an interruption carries on from there;
    - a song counts only if at least 2 clips match it. Songs heard only once are listed but not downloaded.
 
 ## How tracks are downloaded

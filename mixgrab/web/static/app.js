@@ -230,7 +230,10 @@ function renderJob(job) {
   let label = "", info = "", frac = null;
   if (job.status === "reading" || job.status === "queued") { label = JOB_LABEL[job.status]; info = "chapters, description, comments, MixesDB, MusicBrainz"; }
   else if (job.status === "identifying") {
-    if (p.clips) { const [d, t, m] = p.clips; label = "Listening to the mix"; info = `${d}/${t} clips · ${m} matches`; frac = t ? d / t : 0; }
+    if (p.clips) {
+      const [d, t, m, w] = p.clips; label = "Listening to the mix"; frac = t ? d / t : 0;
+      info = `${d}/${t} clips · ${m} matches` + (w ? ` · Shazam is rate-limiting, waiting ${w}s` : "");
+    }
     else if (p.audio) { const [d, t] = p.audio; label = "Downloading the mix audio"; info = t ? `${fmtBytes(d)} / ${fmtBytes(t)}` : fmtBytes(d); frac = t ? d / t : null; }
     else { label = "Identifying from audio"; info = job.note || ""; }
   } else if (job.status === "downloading") {
