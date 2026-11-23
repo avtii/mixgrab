@@ -1,4 +1,4 @@
-"""mixgrab: YouTube mix URL -> tracklist -> Soulseek downloads."""
+"""mixgrab: YouTube / SoundCloud / Mixcloud mix URL -> tracklist -> Soulseek downloads."""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import __version__
 from .tracklist import Tracklist, fetch_tracklist, is_bot_check, load_tracklist_file, use_cookies
+from .youtube import SITES
 
 CONFIG_DIR = Path(os.environ.get("MIXGRAB_HOME", Path.home() / ".mixgrab"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -62,6 +63,8 @@ max_avg_track_len = 600     # tracklist with fewer tracks than duration/this = i
 # quality = "0"             # LAME VBR 0 (best) .. 9, or a bitrate such as "320"
 # cookies = "~/cookies.txt"         # only if YouTube asks to sign in; or run once with --cookies FILE
 # cookies_from_browser = "firefox"  # alternative: read cookies live from a browser
+# [soundcloud]
+# fallback = true           # then SoundCloud (full tracks only, no 30 s previews), saved as '... [SC].mp3'
 # Optional fallback recognizers for clips Shazam misses (SoundHound has no public API):
 # audd_token = ""           # https://audd.io (free quota)
 # [identify.acrcloud]       # https://www.acrcloud.com (best for DJ sets; free trial)
@@ -166,12 +169,14 @@ async def run(args) -> int:
         cfg["download_dir"] = args.out
     if args.no_youtube:
         cfg["youtube"]["fallback"] = False
+    if args.no_soundcloud:
+        cfg["soundcloud"]["fallback"] = False
     if args.no_mp3:
         cfg["convert"]["mp3"] = False
     setup_cookies(cfg, args)
 
     try:
-        with console.status("Reading the video and looking for a tracklist (YouTube, MixesDB, MusicBrainz)…"):
+        with console.status("Reading the mix and looking for a tracklist (page, comments, MixesDB, MusicBrainz)…"):
             if args.tracklist:
                 tl = load_tracklist_file(args.tracklist, args.title or "mix")
             else:
@@ -219,10 +224,10 @@ async def run(args) -> int:
         try:
             await dl.__aenter__()
         except Exception as e:
-            if not cfg["youtube"]["fallback"]:
+            if not (cfg["youtube"]["fallback"] or cfg["soundcloud"]["fallback"]):
                 console.print(f"[red]Soulseek login failed:[/] {esc(str(e))}")
                 return 1
-            console.print(f"[yellow]Soulseek login failed ({esc(str(e))}); using YouTube only.[/]")
+            console.print(f"[yellow]Soulseek login failed ({esc(str(e))}); using YouTube/SoundCloud only.[/]")
             dl = None
     eng = Engine(cfg, dl)
     results = {}
@@ -241,7 +246,7 @@ async def run(args) -> int:
                     r = Fetched(None, None, "", f"error: {e}")
                 results[t.index] = r
                 if r.path:
-                    note = os.path.splitext(r.path)[1].lstrip(".") + (" +mp3" if r.mp3 else "") + (" [YT]" if r.source == "youtube" else "")
+                    note = os.path.splitext(r.path)[1].lstrip(".") + (" +mp3" if r.mp3 else "") + (SITES[r.source].tag if r.source in SITES else "")
                     ui.status(t.index, "skip" if r.source == "cache" else "done", note=note)
                 else:
                     ui.status(t.index, "missing", note=r.msg)
@@ -269,7 +274,7 @@ async def run(args) -> int:
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(prog="mixgrab", description=__doc__)
-    p.add_argument("url", nargs="?", help="YouTube video or playlist URL")
+    p.add_argument("url", nargs="?", help="YouTube video/playlist, SoundCloud or Mixcloud URL")
     p.add_argument("--version", action="version", version=f"mixgrab {__version__}")
     p.add_argument("--check", action="store_true", help="check ffmpeg, JS runtime, cookies and config, then exit")
     p.add_argument("--cookies", metavar="FILE", help="YouTube cookies.txt (saved and reused) if YouTube asks to sign in")
@@ -284,6 +289,7 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="show the tracklist, don't download")
     p.add_argument("--keep-audio", action="store_true", help="keep the downloaded mix audio")
     p.add_argument("--no-youtube", action="store_true", help="don't fall back to YouTube for tracks Soulseek lacks")
+    p.add_argument("--no-soundcloud", action="store_true", help="don't fall back to SoundCloud for tracks Soulseek lacks")
     p.add_argument("--no-mp3", action="store_true", help="don't make MP3 copies of lossless downloads")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--export-cookies", nargs="?", const="auto", metavar="BROWSER",

@@ -93,7 +93,8 @@ class Manager:
         self.dl: Optional[Downloader] = None
         # the same engine the command-line tool runs on; one Soulseek login shared by all jobs
         self.engine = Engine({"soulseek": S.SLSK, "match": S.MATCH, "convert": S.CONVERT,
-                              "youtube": S.YOUTUBE, "identify": S.IDENTIFY})
+                              "youtube": S.YOUTUBE, "soundcloud": S.SOUNDCLOUD,
+                              "identify": S.IDENTIFY})
         self.slsk_state = "offline"
         self.slsk_error = ""
         self._dirty: set[str] = set()
@@ -181,7 +182,7 @@ class Manager:
             await asyncio.sleep(15)
 
     async def _wait_slsk(self, job, limit: int = 60):
-        """Give Soulseek a minute to come online; after that the engine falls back to YouTube."""
+        """Give Soulseek a minute to come online; after that the engine falls back to YouTube/SoundCloud."""
         waited = 0
         while (self.dl is None or self.slsk_state != "online") and waited < limit \
                 and not (self.slsk_state == "offline" and self.slsk_error and waited):   # login failed: don't stall
@@ -189,7 +190,7 @@ class Manager:
             self.mark(job)
             await asyncio.sleep(3)
             waited += 3
-        job["note"] = "" if self.slsk_state == "online" else "Soulseek offline: using YouTube"
+        job["note"] = "" if self.slsk_state == "online" else "Soulseek offline: using YouTube/SoundCloud"
 
     # ---------- persistence ----------
     def mark(self, job):
@@ -308,6 +309,8 @@ class Manager:
                 t.update(note=i.get("reason", "")[:80], done=0)
             elif state == "youtube":
                 t.update(note="not on Soulseek, searching YouTube", done=0, total=0)
+            elif state == "soundcloud":
+                t.update(note="not on Soulseek or YouTube, searching SoundCloud", done=0, total=0)
             elif state == "converting":
                 t["note"] = "making MP3 copy"
             self.mark(job)

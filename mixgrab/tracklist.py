@@ -1,6 +1,6 @@
-"""Find the tracklist of a YouTube mix / DJ set / playlist.
+"""Find the tracklist of a YouTube / SoundCloud / Mixcloud mix, DJ set or playlist.
 
-Sources, in order of trust:
+Sources, in order of trust (Mixcloud first uses the tracklist it shows under the show):
   1. YouTube playlist entries (when the URL is a playlist)
   2. Video chapters
   3. Video description
@@ -246,7 +246,13 @@ def _ydl(extra: dict) -> yt_dlp.YoutubeDL:
 def fetch_tracklist(url: str, log=print, online: bool = True) -> Tracklist:
     with _ydl({"extract_flat": "in_playlist"}) as ydl:
         info = ydl.extract_info(url, download=False)
-    tl = _from_youtube(url, info, log)
+    tl = None
+    if info.get("extractor_key") == "Mixcloud":
+        try:
+            tl = _from_mixcloud(info)
+        except Exception as e:
+            log(f"Mixcloud tracklist unavailable ({e}); reading the description instead.")
+    tl = tl or _from_youtube(url, info, log)
     if online and info.get("_type") != "playlist" and tl.looks_incomplete():
         from .lookup import lookup
         found = lookup(info, log)
@@ -255,6 +261,47 @@ def fetch_tracklist(url: str, log=print, online: bool = True) -> Tracklist:
                       or (len(found.tracks) == len(tl.tracks) and found.unknown < tl.unknown)):
             return found
     return tl
+
+
+_MIXCLOUD_Q = """query($l: CloudcastLookup!) { cloudcastLookup(lookup: $l) { sections { __typename
+  ... on TrackSection { artistName songName startSeconds } ... on ChapterSection { chapter startSeconds } } } }"""
+
+
+def _from_mixcloud(info: dict) -> Optional[Tracklist]:
+    """The tracklist Mixcloud shows under a show (its public API returns it empty; the site's GraphQL doesn't)."""
+    import json
+    import urllib.parse
+    import urllib.request
+    parts = [p for p in urllib.parse.urlparse(info.get("webpage_url") or "").path.split("/") if p]
+    if len(parts) < 2:
+        return None
+    body = json.dumps({"query": _MIXCLOUD_Q,
+                       "variables": {"l": {"username": parts[0], "slug": parts[1]}}}).encode()
+    req = urllib.request.Request("https://app.mixcloud.com/graphql", body,
+                                 {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 mixgrab"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = json.load(r)
+    sections = ((data.get("data") or {}).get("cloudcastLookup") or {}).get("sections") or []
+    tracks, unknown = [], 0
+    for sec in sections:
+        start = sec.get("startSeconds")
+        if sec.get("__typename") == "TrackSection":
+            artist, title = (sec.get("artistName") or "").strip(), (sec.get("songName") or "").strip()
+            if artist.lower() in UNKNOWN and title.lower() in UNKNOWN:
+                unknown += 1
+            elif artist and title:
+                tracks.append(Track(len(tracks) + 1, artist, title, start))
+        else:                                   # chapter: "UNKNOWN" placeholder, or free text
+            p = parse_line(sec.get("chapter") or "")
+            if p:
+                tracks.append(Track(len(tracks) + 1, p[0], p[1], start))
+            elif (sec.get("chapter") or "").strip().lower() in UNKNOWN:
+                unknown += 1
+    if not _good(tracks):
+        return None
+    total = info.get("duration")
+    _fill_lengths(tracks, total)
+    return Tracklist(info.get("title") or "mix", "Mixcloud tracklist", tracks, total, unknown)
 
 
 def _from_youtube(url: str, info: dict, log) -> Tracklist:
@@ -267,9 +314,9 @@ def _from_youtube(url: str, info: dict, log) -> Tracklist:
             p = parse_line(e.get("title") or "")
             if p:
                 tracks.append(Track(len(tracks) + 1, p[0], p[1], None, e.get("duration")))
-            elif e.get("title") and e.get("channel"):
-                # "Title" uploaded by "Artist - Topic" (YouTube Music auto channels)
-                ch = re.sub(r"\s*-\s*Topic$", "", e["channel"])
+            elif e.get("title") and (e.get("channel") or e.get("uploader")):
+                # "Title" uploaded by "Artist - Topic" (YouTube Music auto channels) or the artist (SoundCloud sets)
+                ch = re.sub(r"\s*-\s*Topic$", "", e.get("channel") or e["uploader"])
                 tracks.append(Track(len(tracks) + 1, ch, VIDEO_JUNK_RE.sub("", e["title"]).strip(),
                                     None, e.get("duration")))
         return Tracklist(title, "playlist entries", tracks)

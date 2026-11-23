@@ -61,7 +61,7 @@ const JOB_LABEL = { queued: "Queued", reading: "Reading tracklist", identifying:
 const JOB_PILL = { queued: "run", reading: "run", identifying: "run", downloading: "run", done: "ok", error: "bad", interrupted: "warn" };
 const TRACK_TAG = {
   pending: ["Waiting", "wait"], searching: ["Searching", "run"], waiting: ["Found", "run"], queued: ["In peer queue", "warn"],
-  downloading: ["Downloading", "run"], retry: ["Retrying", "warn"], youtube: ["Trying YouTube", "run"],
+  downloading: ["Downloading", "run"], retry: ["Retrying", "warn"], youtube: ["Trying YouTube", "run"], soundcloud: ["Trying SoundCloud", "run"],
   converting: ["To MP3", "run"], done: ["Done", "ok"], missing: ["Not found", "bad"], expired: ["Expired", "wait"],
 };
 
@@ -249,10 +249,12 @@ function renderJob(job) {
   // summary
   const done = job.tracks.filter((t) => t.state === "done");
   const yt = done.filter((t) => t.origin === "youtube").length;
+  const sc = done.filter((t) => t.origin === "soundcloud").length;
   const size = done.reduce((s, t) => s + (t.size || 0), 0);
   const sum = [];
   if (job.tracks.length) sum.push(`${done.length} of ${job.tracks.length} tracks`, fmtBytes(size));
   if (yt) sum.push(`${yt} from YouTube`);
+  if (sc) sum.push(`${sc} from SoundCloud`);
   const miss = job.tracks.filter((t) => t.state === "missing").length;
   if (miss) sum.push(`${miss} not found`);
   if (job.status === "error" && job.error) sum.push(job.error);
@@ -270,11 +272,12 @@ function renderJob(job) {
 function trackRow(job, t) {
   const [tagText, tagCls] = TRACK_TAG[t.state] || [t.state, "wait"];
   const pct = t.state === "done" ? 100 : t.total ? Math.min(100, (t.done / t.total) * 100) : 0;
-  const running = ["searching", "waiting", "queued", "youtube", "converting"].includes(t.state) || (t.state === "downloading" && !t.total);
+  const running = ["searching", "waiting", "queued", "youtube", "soundcloud", "converting"].includes(t.state) || (t.state === "downloading" && !t.total);
   const fmts = el("span", { class: "fmt-row" });
   if (t.ext && t.state === "done") {
     fmts.append(el("span", { class: "fmt", text: t.ext }));
     if (t.origin === "youtube") fmts.append(el("span", { class: "fmt yt", text: "YT", title: "Not on Soulseek — taken from YouTube" }));
+    if (t.origin === "soundcloud") fmts.append(el("span", { class: "fmt yt", text: "SC", title: "Not on Soulseek or YouTube — taken from SoundCloud" }));
     if (t.mp3_url) fmts.append(el("a", { class: "fmt", href: t.mp3_url, text: "mp3", title: "Download the MP3 copy", download: true }));
   }
   const acts = el("div", { class: "acts" });
