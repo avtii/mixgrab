@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = ["yt-dlp", "aioslsk>=1.7", "shazamio", "rich", "aiohttp"]
 
 [project.optional-dependencies]
-web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.30"]
 
 [project.scripts]
 mixgrab = "mixgrab.cli:main"

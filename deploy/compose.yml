@@ -11,14 +11,20 @@ services:
       YTDLP_COOKIES: ${YTDLP_COOKIES:-}
       POT_URL: http://mixgrab-pot:4416   # YouTube PO tokens (needed alongside cookies by some clients)
       BROWSER_PROFILE: /browser/Default  # the sign-in browser's Chromium profile, for its YouTube cookies
+      SLSK_PORT: "61234"                 # set here, not in .env: it must match the ports published below
     volumes:
       - ./data:/data
       - ./browser/.config/chromium:/browser:ro
+    # Soulseek peers must reach these from the internet, so they stay on all interfaces.
+    # Changing the port means changing SLSK_PORT above and both lines here (obfuscated = SLSK_PORT + 1).
     ports:
       - "61234:61234"        # Soulseek peers connect here (plain)
       - "61235:61235"        # Soulseek obfuscated port
     networks: [burrball_default]
     mem_limit: 1500m
+    # runs as uid 1000 and binds only ports above 1024: it needs no Linux capabilities at all
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     depends_on: [mixgrab-pot]
 
   # Mints YouTube proof-of-origin tokens for yt-dlp (bgutil-ytdlp-pot-provider). Internal only, no ports.

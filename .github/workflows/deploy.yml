@@ -73,12 +73,13 @@ jobs:
       - name: Report what is configured
         run: |
           echo "DEPLOY_HOST set: ${{ env.DEPLOY_HOST != '' }}"
+          echo "DEPLOY_USER set: ${{ env.DEPLOY_USER != '' }}"
           echo "DEPLOY_KEY set: ${{ env.HAS_KEY != '' }}"
           echo "MIXGRAB_PASSWORD set: ${{ env.HAS_PW != '' }}"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        if: env.DEPLOY_HOST != '' && env.HAS_KEY != '' && env.HAS_PW != ''
+        if: env.DEPLOY_HOST != '' && env.DEPLOY_USER != '' && env.HAS_KEY != '' && env.HAS_PW != ''
       - name: Copy compose file
-        if: env.DEPLOY_HOST != '' && env.HAS_KEY != '' && env.HAS_PW != ''
+        if: env.DEPLOY_HOST != '' && env.DEPLOY_USER != '' && env.HAS_KEY != '' && env.HAS_PW != ''
         uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7
         with:
           host: ${{ env.DEPLOY_HOST }}
@@ -90,7 +91,7 @@ jobs:
           target: /opt/mixgrab
           strip_components: 1
       - name: Configure, pull and restart on the server
-        if: env.DEPLOY_HOST != '' && env.HAS_KEY != '' && env.HAS_PW != ''
+        if: env.DEPLOY_HOST != '' && env.DEPLOY_USER != '' && env.HAS_KEY != '' && env.HAS_PW != ''
         uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
         env:
           GHCR_USER: ${{ github.actor }}
@@ -112,6 +113,17 @@ jobs:
           command_timeout: 20m
           script: |
             set -eu
+            # the site block below is written with this name: a plain host name only
+            case "$DOMAIN" in
+              ""|.*|*.|*..*|*[!A-Za-z0-9.-]*) echo "MIXGRAB_DOMAIN '$DOMAIN' isn't a plain host name"; exit 1 ;;
+            esac
+            # .env values are single-quoted (taken literally, no $ expansion), so they can't hold a ' or a line break
+            NL=$(printf '\n_'); NL=${NL%_}
+            for v in "$MIXGRAB_USER" "$MIXGRAB_PASSWORD" "$AUDD_TOKEN" "$ACR_HOST" "$ACR_ACCESS_KEY" "$ACR_ACCESS_SECRET"; do
+              case "$v" in
+                *"'"*|*"$NL"*) echo "A secret or variable contains ' or a line break, which .env can't carry. Change it and deploy again."; exit 1 ;;
+              esac
+            done
             cd /opt/mixgrab
             mkdir -p data browser/.config/chromium && chown 1000:1000 data && chown -R 1000:1000 browser
             umask 077
@@ -123,6 +135,8 @@ jobs:
               [ -f extra.env ] && cat extra.env
               true
             } > .env
+            # the registry token must not stay on the host, whichever step below fails
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             # one image at a time (parallel pulls can hit a containerd "lease does not exist" race), with a retry
             for s in $(docker compose config --services); do
@@ -130,27 +144,38 @@ jobs:
             done
             docker compose up -d
             docker logout ghcr.io
-            # Caddy (burrball stack): (re)write the mixgrab site block when it's missing or outdated, then reload.
+            # Caddy (burrball stack): (re)write the mixgrab site block when it's missing or differs from this
+            # one (the marker carries a hash of the block, so any change here reaches the server), then reload.
             # /yt-login/* goes to the sign-in browser only after mixgrab confirms the owner session.
             CF=/root/burrball/Caddyfile
-            if [ -f "$CF" ] && ! grep -q "mixgrab-block v3" "$CF"; then
+            BODY=$(printf '\t@ytlogin path /yt-login /yt-login/*\n\thandle @ytlogin {\n\t\tforward_auth mixgrab:8080 {\n\t\t\turi /api/authcheck\n\t\t\theader_up -Upgrade\n\t\t\theader_up -Connection\n\t\t}\n\t\treverse_proxy mixgrab-browser:3000\n\t}\n\thandle {\n\t\tencode gzip\n\t\treverse_proxy mixgrab:8080\n\t}')
+            H=$(printf '%s\n%s' "$DOMAIN" "$BODY" | sha256sum | cut -c1-12)
+            if [ -f "$CF" ] && ! grep -qF "# mixgrab-block $H" "$CF"; then
               cp "$CF" "$CF.bak-mixgrab"
               awk -v d="$DOMAIN {" '$0==d{skip=1;next} skip&&$0=="}"{skip=0;next} !skip' "$CF.bak-mixgrab" > "$CF.new"
-              printf '\n%s {\n\t# mixgrab-block v3\n\t@ytlogin path /yt-login /yt-login/*\n\thandle @ytlogin {\n\t\tforward_auth mixgrab:8080 {\n\t\t\turi /api/authcheck\n\t\t\theader_up -Upgrade\n\t\t\theader_up -Connection\n\t\t}\n\t\treverse_proxy mixgrab-browser:3000\n\t}\n\thandle {\n\t\tencode gzip\n\t\treverse_proxy mixgrab:8080\n\t}\n}\n' "$DOMAIN" >> "$CF.new"
+              printf '\n%s {\n\t# mixgrab-block %s\n%s\n}\n' "$DOMAIN" "$H" "$BODY" >> "$CF.new"
               cat "$CF.new" > "$CF" && rm -f "$CF.new"     # write in place: the Caddyfile is bind-mounted
               if V=$(docker exec burrball-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) || { echo "$V" | tail -3; false; }; then
-                docker exec burrball-caddy-1 caddy reload --config /etc/caddy/Caddyfile
-                echo "Caddy: wrote the $DOMAIN block"
+                if docker exec burrball-caddy-1 caddy reload --config /etc/caddy/Caddyfile; then
+                  echo "Caddy: wrote the $DOMAIN block ($H)"
+                else
+                  cat "$CF.bak-mixgrab" > "$CF"
+                  docker exec burrball-caddy-1 caddy reload --config /etc/caddy/Caddyfile || true
+                  echo "Caddy: reload failed, restored the previous Caddyfile"
+                  exit 1
+                fi
               else
                 cat "$CF.bak-mixgrab" > "$CF"
                 echo "Caddy: new block failed validation, restored the previous Caddyfile"
+                exit 1
               fi
             fi
             docker image prune -f
             sleep 5
             docker compose ps
             free -m | head -2
-            docker exec mixgrab python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/healthz').read())"
+            # from inside the container /healthz also reports Soulseek, YouTube cookies and the PO-token provider
+            docker exec mixgrab python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/healthz').read().decode())"
       - name: Skipped
-        if: env.DEPLOY_HOST == '' || env.HAS_KEY == '' || env.HAS_PW == ''
-        run: echo "DEPLOY_HOST, DEPLOY_KEY or MIXGRAB_PASSWORD is missing, so the image was published but not deployed."
+        if: env.DEPLOY_HOST == '' || env.DEPLOY_USER == '' || env.HAS_KEY == '' || env.HAS_PW == ''
+        run: echo "DEPLOY_HOST, DEPLOY_USER, DEPLOY_KEY or MIXGRAB_PASSWORD is missing, so the image was published but not deployed."

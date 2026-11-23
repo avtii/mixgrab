@@ -37,7 +37,11 @@ jobs:
         shell: bash
         run: |
           ./dist/mixgrab --version
-          ./dist/mixgrab --check || true
+          # --check exits 1 on the runner (no ffmpeg/deno there), which is fine; a crash is not
+          out=$(./dist/mixgrab --check 2>&1) || true
+          echo "$out"
+          if echo "$out" | grep -q "Traceback"; then echo "the binary crashed"; exit 1; fi
+          echo "$out" | grep -qE "^(ready|fix the MISSING items)" || { echo "--check didn't finish"; exit 1; }
           ./dist/mixgrab --help > /dev/null
       - name: Package (Windows)
         if: runner.os == 'Windows'

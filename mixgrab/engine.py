@@ -16,7 +16,7 @@ from typing import Optional
 
 from . import youtube
 from .identify import find_ffmpeg
-from .soulseek import LOSSLESS, STATUS_CB, Downloader, safe_name
+from .soulseek import LOSSLESS, PARTIAL, STATUS_CB, Downloader, track_prefix
 from .tracklist import Track
 
 log = logging.getLogger("mixgrab")
@@ -44,8 +44,14 @@ class Fetched:
     msg: str = ""                # human-readable detail / reason for failure
 
 
-def track_prefix(t: Track) -> str:
-    return f"{t.index:02d} - {safe_name(t.label)}"
+FFMPEG_TIMEOUT = 15 * 60          # a single encode of even a long FLAC takes well under this
+
+
+def _nonempty(p: str) -> bool:
+    try:
+        return os.path.getsize(p) > 0
+    except OSError:
+        return False
 
 
 def existing(out_dir: str, t: Track) -> Optional[tuple[str, Optional[str], str]]:
@@ -56,15 +62,18 @@ def existing(out_dir: str, t: Track) -> Optional[tuple[str, Optional[str], str]]
     except OSError:
         return None
     mine = [n for n in names if (n.startswith(prefix + ".") or n.startswith(tuple(prefix + tg + "." for tg in youtube.TAGS)))
-            and not n.endswith((".part", ".tmp")) and ".yt." not in n]
+            and not n.endswith(PARTIAL) and ".yt." not in n
+            and _nonempty(os.path.join(out_dir, n))]
     if not mine:
         return None
     ext = lambda n: os.path.splitext(n)[1].lstrip(".").lower()
     lossless = [n for n in mine if ext(n) in LOSSLESS]
-    mp3 = next((n for n in mine if ext(n) == "mp3"), None)
     j = lambda n: os.path.join(out_dir, n) if n else None
     if lossless:
+        # its MP3 copy is exactly 'prefix.mp3': an older '[YT]'/'[SC]' MP3 is a different recording
+        mp3 = prefix + ".mp3" if prefix + ".mp3" in mine else None
         return j(lossless[0]), j(mp3), "cache"
+    mp3 = next((n for n in mine if ext(n) == "mp3"), None)
     main = mp3 or mine[0]
     return j(main), None, "cache"
 
@@ -142,6 +151,9 @@ class Engine:
                 except Exception as e:
                     err = e
                     log.debug("[%02d] %s download attempt %d failed", t.index, site.name, attempt + 1, exc_info=True)
+                    youtube.remove_partials(dest)      # a broken half-download mustn't poison the retry
+                    if attempt == 2 or not transient(e):
+                        break                          # no point waiting to fail the same way again
                     await asyncio.sleep(5 * (attempt + 1))
             if not path:
                 return None, f"download failed ({str(err)[:120]})"
@@ -158,6 +170,43 @@ class Engine:
             except Exception as e:
                 log.warning("[%02d] MP3 conversion failed: %s", t.index, e)
                 return None
+
+
+_TRANSIENT = ("timed out", "timeout", "connection", "temporarily", "reset by peer", "incompleteread",
+              "http error 5", "http error 429", "too many requests", "unable to download", "network",
+              "eof occurred", "remote end closed", "fragment")
+
+
+def transient(e: BaseException) -> bool:
+    """Worth retrying (network trouble), as opposed to a private/removed video, a bot check or bad settings."""
+    s = str(e).lower()
+    return any(w in s for w in _TRANSIENT)
+
+
+def find_ffprobe(ffmpeg: str) -> Optional[str]:
+    """ffprobe next to ffmpeg (ffmpeg.exe -> ffprobe.exe, keeping the folder), else on PATH."""
+    import shutil
+    folder, name = os.path.split(ffmpeg)
+    cand = os.path.join(folder, "ffprobe" + os.path.splitext(name)[1])
+    return cand if os.path.isfile(cand) else shutil.which("ffprobe")
+
+
+def probe_duration(audio: str) -> int:
+    """Length of an audio file in whole seconds, 0 if it can't be read."""
+    probe = find_ffprobe(find_ffmpeg())
+    if not probe:
+        return 0
+    try:
+        r = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    for line in r.stdout.splitlines():                # first numeric line; 'N/A' when unknown
+        try:
+            return max(0, int(float(line.strip())))
+        except ValueError:
+            continue
+    return 0
 
 
 def identify_reason(tl, mode: str, ic: dict) -> Optional[str]:
@@ -183,18 +232,16 @@ async def identify_into(tl, url: str, work: str, ic: dict,
     import json
     from .identify import download_audio, hits_to_tracks, listed_spans, merge, recognizers, scan
     audio = await asyncio.to_thread(download_audio, url, work, on_audio)
-    duration = tl.duration
-    if not duration:
-        ff = find_ffmpeg()
-        probe = os.path.join(os.path.dirname(ff), os.path.basename(ff).replace("ffmpeg", "ffprobe"))
-        r = await asyncio.to_thread(subprocess.run, [probe, "-v", "error",
-                                    "-show_entries", "format=duration", "-of", "csv=p=0", audio],
-                                    capture_output=True, text=True)
-        try:
-            duration = int(float(r.stdout.strip()))
-        except ValueError:
-            duration = 0
-    hits, complete = await scan(audio, duration, ic.get("step", 90), progress=on_clips, fallbacks=recognizers(ic),
+    duration = tl.duration or await asyncio.to_thread(probe_duration, audio)
+    if not duration:                                   # one clip at 0:00 would identify nothing
+        log.warning("couldn't tell how long the mix audio is; skipping audio ID")
+        tl.found_in += " (audio ID skipped: unknown length)"
+        return [], True
+    try:
+        step = max(10, int(ic.get("step", 90)))          # 0 or junk in the config: fall back to sane steps
+    except (TypeError, ValueError):
+        step = 90
+    hits, complete = await scan(audio, duration, step, progress=on_clips, fallbacks=recognizers(ic),
                       cache=os.path.join(work, "clips.json"), skip=listed_spans(tl.tracks))
     with open(os.path.join(work, "hits.json"), "w", encoding="utf-8") as f:
         json.dump([h.__dict__ for h in hits], f, indent=1, ensure_ascii=False)
@@ -208,18 +255,23 @@ async def identify_into(tl, url: str, work: str, ic: dict,
 def to_mp3(ffmpeg: str, src: str, bitrate: int = 320) -> str:
     """Encode an MP3 next to src (same name, .mp3), keeping tags and cover art. The original stays."""
     dst = os.path.splitext(src)[0] + ".mp3"
-    if os.path.exists(dst):
+    if os.path.exists(dst) and os.path.getsize(dst) > 0:
         return dst
     tmp = dst + ".tmp"
-    cmd = [ffmpeg, "-v", "error", "-y", "-i", src, "-map", "0:a:0", "-map", "0:v?", "-c:v", "copy",
-           "-c:a", "libmp3lame", "-b:a", f"{bitrate}k", "-map_metadata", "0", "-id3v2_version", "3",
-           "-f", "mp3", tmp]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+
+    def run(cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(cmd, 1, "", "ffmpeg took too long")
+
+    r = run([ffmpeg, "-v", "error", "-y", "-i", src, "-map", "0:a:0", "-map", "0:v?", "-c:v", "copy",
+             "-c:a", "libmp3lame", "-b:a", f"{bitrate}k", "-map_metadata", "0", "-id3v2_version", "3",
+             "-f", "mp3", tmp])
     if r.returncode != 0:                              # odd cover-art streams: retry audio only
-        cmd = [ffmpeg, "-v", "error", "-y", "-i", src, "-map", "0:a:0", "-c:a", "libmp3lame",
-               "-b:a", f"{bitrate}k", "-map_metadata", "0", "-id3v2_version", "3", "-f", "mp3", tmp]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
+        r = run([ffmpeg, "-v", "error", "-y", "-i", src, "-map", "0:a:0", "-c:a", "libmp3lame",
+                 "-b:a", f"{bitrate}k", "-map_metadata", "0", "-id3v2_version", "3", "-f", "mp3", tmp])
+    if r.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
         try:
             os.remove(tmp)
         except OSError:

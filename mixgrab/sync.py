@@ -4,12 +4,19 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass, field
 
 AUDIO = {".mp3", ".flac", ".wav", ".aiff", ".aif", ".m4a", ".ogg", ".opus", ".wma", ".ape", ".alac"}
 LOSSLESS = {".flac", ".wav", ".aiff", ".aif", ".ape", ".alac"}
 SKIP_SUFFIX = (".part", ".tmp", ".ytdl")
 FAT_SLACK = 2          # FAT/exFAT keep modification times to 2 seconds
+# Windows and macOS file names ignore case: "Song.MP3" on the stick is the source's "song.mp3"
+FOLD_CASE = os.name == "nt" or sys.platform == "darwin"
+
+
+def _key(rel: str) -> str:
+    return os.path.normcase(rel).casefold() if FOLD_CASE else rel
 
 
 DRIVE_RE = re.compile(r"[A-Za-z]:?[\\/]?")
@@ -47,6 +54,14 @@ class Plan:
     same: int = 0
     remove: list[str] = field(default_factory=list)                   # with mirror: files only on the drive
     playlists: list[tuple[str, str]] = field(default_factory=list)    # m3u to rewrite for mp3-only
+    source: str = ""
+    dest: str = ""
+    mp3_only: bool = False
+    # filled in by run()
+    copied: int = 0
+    removed: int = 0
+    rewritten: int = 0
+    kept: list[str] = field(default_factory=list)   # planned removals that run() refused (see _may_remove)
 
     @property
     def bytes(self) -> int:
@@ -83,8 +98,9 @@ def plan(library: str, dest: str, mp3_only: bool = False, mirror: bool = False) 
         raise ValueError("the source and the destination overlap")
     if mirror and os.path.islink(dest):
         raise ValueError("won't mirror into a destination that is a link")
-    p = Plan()
+    p = Plan(source=library, dest=dest, mp3_only=mp3_only)
     want = _wanted(library, mp3_only)
+    want_keys = {_key(rel) for rel in want}
     for rel, src in want.items():
         dst = os.path.join(dest, rel)
         if mp3_only and rel.lower().endswith(".m3u"):
@@ -99,16 +115,42 @@ def plan(library: str, dest: str, mp3_only: bool = False, mirror: bool = False) 
             dirs[:] = [x for x in dirs if not x.startswith(".")]
             for n in files:
                 full = os.path.join(d, n)
-                if os.path.relpath(full, dest) not in want:
+                if _key(os.path.relpath(full, dest)) not in want_keys:
                     p.remove.append(full)
     return p
+
+
+def _may_remove(p: Plan, f: str) -> bool:
+    """Last check before a mirror deletes f: it is really inside the destination (no link leads out),
+    and the source still has no file for it. The plan may be minutes old by the time someone says yes."""
+    dest = p.dest
+    if not dest or not p.source or overlaps(p.source, dest):
+        return False
+    real_dest = os.path.normcase(os.path.realpath(dest))
+    real_dir = os.path.normcase(os.path.realpath(os.path.dirname(f)))
+    try:
+        inside = os.path.commonpath([real_dest, real_dir]) == real_dest
+    except ValueError:                              # different drives: a junction leads elsewhere
+        inside = False
+    if not inside or os.path.islink(f):
+        return False
+    rel = os.path.relpath(f, dest)
+    if rel.startswith(os.pardir):
+        return False
+    src = os.path.join(p.source, rel)
+    if os.path.exists(src):
+        stem, ext = os.path.splitext(src)
+        # with --mp3-only a lossless file is replaced by its MP3 copy, so it still goes
+        return p.mp3_only and ext.lower() in LOSSLESS and os.path.exists(stem + ".mp3")
+    return True
 
 
 def _mp3_playlist(src: str, dst: str):
     """The library playlist with lossless entries pointed at their MP3 copies."""
     folder = os.path.dirname(src)
     lines = []
-    with open(src, encoding="utf-8") as f:
+    # surrogateescape: a playlist saved in another encoding passes through byte for byte
+    with open(src, encoding="utf-8", errors="surrogateescape") as f:
         for line in f.read().splitlines():
             stem, ext = os.path.splitext(line)
             if line and not line.startswith("#") and ext.lower() in LOSSLESS \
@@ -116,7 +158,7 @@ def _mp3_playlist(src: str, dst: str):
                 line = stem + ".mp3"
             lines.append(line)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    with open(dst, "w", encoding="utf-8") as f:
+    with open(dst, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -131,6 +173,7 @@ def run(p: Plan, dest: str, progress=lambda done_bytes, name: None) -> list[tupl
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(src, tmp)                  # a pulled stick leaves a .part, never a cut-off song
             os.replace(tmp, dst)
+            p.copied += 1
         except OSError as e:
             errors.append((src, e.strerror or str(e)))
             try:
@@ -142,11 +185,16 @@ def run(p: Plan, dest: str, progress=lambda done_bytes, name: None) -> list[tupl
     for src, dst in p.playlists:
         try:
             _mp3_playlist(src, dst)
-        except OSError as e:
-            errors.append((src, e.strerror or str(e)))
+            p.rewritten += 1
+        except (OSError, ValueError) as e:          # one odd playlist mustn't stop the rest
+            errors.append((src, getattr(e, "strerror", None) or str(e)))
     for f in p.remove:
+        if not _may_remove(p, f):
+            p.kept.append(f)
+            continue
         try:
             os.remove(f)
+            p.removed += 1
         except OSError as e:
             errors.append((f, e.strerror or str(e)))
     if p.remove:                                    # drop folders the mirror emptied

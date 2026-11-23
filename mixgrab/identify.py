@@ -6,7 +6,9 @@ import glob
 import logging
 import os
 import shutil
+import re
 import subprocess
+import time
 from dataclasses import dataclass
 
 import yt_dlp
@@ -17,6 +19,7 @@ from .tracklist import Track
 
 log = logging.getLogger("mixgrab")
 CLIP = 12  # Shazam's window; >=15 s returns no matches
+CLIP_TIMEOUT = 60   # one 12 s clip; a hung ffmpeg (bad seek on a broken file) mustn't hold a worker slot
 
 
 FFMPEG_HINT = {"win32": "winget install Gyan.FFmpeg", "darwin": "brew install ffmpeg"}
@@ -64,9 +67,10 @@ def _small_audio(ctx):
 def download_audio(url: str, work_dir: str, progress=lambda done, total: None) -> str:
     os.makedirs(work_dir, exist_ok=True)
     existing = [p for p in glob.glob(os.path.join(work_dir, "mixaudio.*"))
-                if not p.endswith((".part", ".ytdl")) and ".part-Frag" not in p]
+                if not p.endswith((".part", ".ytdl", ".tmp")) and ".part-Frag" not in p
+                and ".temp." not in p and os.path.getsize(p) > 0]
     if existing:
-        return existing[0]
+        return max(existing, key=os.path.getsize)        # several formats from older runs: the fullest
     opts = {"quiet": True, "no_warnings": True, "noprogress": True, "format": _small_audio,
             "outtmpl": os.path.join(work_dir, "mixaudio.%(ext)s"), "noplaylist": True,
             "progress_hooks": [lambda d: progress(d.get("downloaded_bytes") or 0,
@@ -78,7 +82,7 @@ def download_audio(url: str, work_dir: str, progress=lambda done, total: None) -
 def clip(ffmpeg: str, src: str, at: int) -> bytes:
     r = subprocess.run([ffmpeg, "-v", "error", "-ss", str(at), "-t", str(CLIP), "-i", src,
                         "-ac", "1", "-ar", "16000", "-map_metadata", "-1", "-bitexact", "-f", "wav", "-"],
-                       capture_output=True, check=True)
+                       capture_output=True, check=True, timeout=CLIP_TIMEOUT)
     return fix_wav_header(r.stdout)
 
 
@@ -107,6 +111,15 @@ def fix_wav_header(b: bytes) -> bytes:
 # ---------------- optional fallback recognizers (used on clips Shazam can't place) ----------------
 # SoundHound has no public recognition API (Houndify is enterprise-gated), so the keyed options are
 # AudD (api_token, small free quota) and ACRCloud (host + access key/secret; best coverage for DJ sets).
+class RecognizerDown(RuntimeError):
+    """The service refused us for good (bad key, quota): stop asking it for this scan."""
+
+
+def _acr_host(host: str) -> str:
+    """'https://identify-eu-west-1.acrcloud.com/' and the bare host name both work."""
+    return re.sub(r"^\w+://", "", (host or "").strip()).split("/")[0]
+
+
 async def _audd(session, token: str, data: bytes):
     import aiohttp
     form = aiohttp.FormData()
@@ -114,10 +127,17 @@ async def _audd(session, token: str, data: bytes):
     form.add_field("file", data, filename="clip.wav", content_type="audio/wav")
     async with session.post("https://api.audd.io/", data=form, timeout=aiohttp.ClientTimeout(total=30)) as r:
         js = await r.json(content_type=None)
+    if not isinstance(js, dict):
+        raise RuntimeError("AudD: unexpected reply")
     if js.get("status") == "error":
-        raise RuntimeError(f"AudD: {js.get('error', {}).get('error_message')}")
+        err = js.get("error")
+        msg = err.get("error_message") if isinstance(err, dict) else err
+        raise RecognizerDown(f"AudD: {msg or 'error'}")
     res = js.get("result")
-    return (res["artist"], res["title"]) if res and res.get("artist") and res.get("title") else None
+    if not isinstance(res, dict):
+        return None
+    artist, title = res.get("artist"), res.get("title")
+    return (artist, title) if isinstance(artist, str) and isinstance(title, str) and artist and title else None
 
 
 async def _acrcloud(session, conf: dict, data: bytes):
@@ -130,25 +150,33 @@ async def _acrcloud(session, conf: dict, data: bytes):
                  "signature": sig, "data_type": "audio", "signature_version": "1"}.items():
         form.add_field(k, v)
     form.add_field("sample", data, filename="clip.wav", content_type="audio/wav")
-    url = f"https://{conf['host']}/v1/identify"
+    url = f"https://{_acr_host(conf['host'])}/v1/identify"
     async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30)) as r:
         js = await r.json(content_type=None)
-    code = js.get("status", {}).get("code")
+    if not isinstance(js, dict):
+        raise RuntimeError("ACRCloud: unexpected reply")
+    status = js.get("status") if isinstance(js.get("status"), dict) else {}
+    code = status.get("code")
     if code not in (0, 1001):                       # 1001 = no result
-        raise RuntimeError(f"ACRCloud: {js.get('status', {}).get('msg')}")
-    music = (js.get("metadata") or {}).get("music") or []
-    if not music:
+        msg = f"ACRCloud: {status.get('msg') or code or 'unexpected reply'}"
+        # 3xxx are key, signature, quota and limit errors; anything else (2xxx decode, busy) is one clip
+        raise RecognizerDown(msg) if isinstance(code, int) and 3000 <= code < 4000 else RuntimeError(msg)
+    meta = js.get("metadata") if isinstance(js.get("metadata"), dict) else {}
+    music = meta.get("music") if isinstance(meta.get("music"), list) else []
+    m = music[0] if music and isinstance(music[0], dict) else None
+    if not m:
         return None
-    m = music[0]
-    artist = ", ".join(a.get("name", "") for a in m.get("artists", [])) or ""
-    return (artist, m.get("title", "")) if artist and m.get("title") else None
+    names = [a.get("name") for a in m.get("artists") or [] if isinstance(a, dict)]
+    artist = ", ".join(n for n in names if isinstance(n, str) and n)
+    title = m.get("title")
+    return (artist, title) if artist and isinstance(title, str) and title else None
 
 
 def recognizers(conf: dict) -> list[tuple[str, object]]:
     """Fallback recognizers enabled by config: {'audd_token': ..., 'acrcloud': {host, access_key, access_secret}}."""
     out = []
     acr = conf.get("acrcloud") or {}
-    if acr.get("host") and acr.get("access_key") and acr.get("access_secret"):
+    if isinstance(acr, dict) and _acr_host(acr.get("host")) and acr.get("access_key") and acr.get("access_secret"):
         out.append(("ACRCloud", lambda s, d: _acrcloud(s, acr, d)))
     if conf.get("audd_token"):
         out.append(("AudD", lambda s, d: _audd(s, conf["audd_token"], d)))
@@ -169,6 +197,8 @@ class Hit:
 SHAZAM_GAP = 1.0       # seconds between Shazam requests to start with; grows after each rate limit
 REFINE_MIN_STEP = 60   # a first pass this coarse or coarser gets a second, in-between pass where needed
 GIVE_UP_STRIKES = 5    # rate limits in a row (after 30+60+120+240 s of pauses) before the scan stops
+FALLBACK_STRIKES = 3   # failures in a row (timeouts, odd replies) before a fallback is dropped
+CACHE_SAVE_EVERY = 5.0 # seconds between cache writes; the file is rewritten whole, so not per clip
 
 
 class ShazamBusy(Exception):
@@ -313,6 +343,8 @@ async def scan(audio: str, duration: int, step: int, parallel: int = 3,
     seen: dict[int, object] = {}               # at -> song key, None (no match) or a listed span
     fallbacks = list(fallbacks or [])
     dead: set[str] = set()                     # fallbacks that errored hard (bad key, quota) are skipped
+    fails: dict[str, int] = {}                 # fallback -> failures in a row
+    last_save = [0.0]
     st = {"done": 0, "total": 0, "wait": 0}
 
     def report():
@@ -347,8 +379,10 @@ async def scan(audio: str, duration: int, step: int, parallel: int = 3,
                         raise
                 continue
             pacer.ok()
-            tr = res.get("track")
-            return (tr.get("subtitle", "").strip(), tr.get("title", "").strip()) if tr else None
+            tr = res.get("track") if isinstance(res, dict) else None
+            if not isinstance(tr, dict):
+                return None
+            return (str(tr.get("subtitle") or "").strip(), str(tr.get("title") or "").strip())
 
     def record(at: int, found):
         if found and found[0] and found[1]:
@@ -376,12 +410,19 @@ async def scan(audio: str, duration: int, step: int, parallel: int = 3,
                             continue
                         try:
                             found, answered = await fn(session, data), True
+                            fails[name] = 0
                         except Exception as e:
-                            log.warning("%s disabled for this scan: %s", name, e)
-                            dead.add(name)
+                            fails[name] = fails.get(name, 0) + 1
+                            if isinstance(e, RecognizerDown) or fails[name] >= FALLBACK_STRIKES:
+                                log.warning("%s disabled for this scan: %s", name, e or type(e).__name__)
+                                dead.add(name)
+                            else:
+                                log.debug("%s at %ds failed: %s", name, at, e or type(e).__name__)
                     if answered:                # errors aren't saved: a later run asks again
                         saved[at] = found
-                        _save_cache(cache, saved)
+                        if time.monotonic() - last_save[0] >= CACHE_SAVE_EVERY:
+                            last_save[0] = time.monotonic()
+                            _save_cache(cache, saved)
                     record(at, found)
                 except Exception as e:
                     log.debug("clip at %ds failed: %s", at, e)
@@ -393,26 +434,29 @@ async def scan(audio: str, duration: int, step: int, parallel: int = 3,
         report()
         await asyncio.gather(*(one(session, p) for p in points))
 
-    async with aiohttp.ClientSession() as session:
-        first = []
-        for p in coarse:
-            if span_of(p):
-                seen[p] = span_of(p)
-            else:
-                first.append(p)
-        log.debug("Identifying: %d clips of %ds, every %ds (%d skipped as listed)",
-                  len(first), CLIP, step, len(coarse) - len(first))
-        await run(first)
-        if refine and step >= REFINE_MIN_STEP and not pacer.closed:
-            marks = sorted(seen)
-            mids = []
-            for a, b in zip(marks, marks[1:]):
-                if seen[a] != seen[b] or seen[a] is None:
-                    m = (a + b) // 2
-                    if not span_of(m):
-                        mids.append(m)
-            log.debug("Second pass: %d clips where neighbours differ or missed", len(mids))
-            await run(mids)
+    try:
+        async with aiohttp.ClientSession() as session:
+            first = []
+            for p in coarse:
+                if span_of(p):
+                    seen[p] = span_of(p)
+                else:
+                    first.append(p)
+            log.debug("Identifying: %d clips of %ds, every %ds (%d skipped as listed)",
+                      len(first), CLIP, step, len(coarse) - len(first))
+            await run(first)
+            if refine and step >= REFINE_MIN_STEP and not pacer.closed:
+                marks = sorted(seen)
+                mids = []
+                for a, b in zip(marks, marks[1:]):
+                    if seen[a] != seen[b] or seen[a] is None:
+                        m = (a + b) // 2
+                        if not span_of(m):
+                            mids.append(m)
+                log.debug("Second pass: %d clips where neighbours differ or missed", len(mids))
+                await run(mids)
+    finally:
+        _save_cache(cache, saved)              # whatever the throttle held back
     close = getattr(getattr(shazam, "http_client", None), "close", None)
     if close:
         try:
@@ -446,9 +490,14 @@ def hits_to_tracks(hits: list[Hit], min_hits: int, duration: int) -> tuple[list[
 
 def merge(listed: list[Track], found: list[Track]) -> list[Track]:
     """Combine a partial tracklist with identified tracks, dropping duplicates."""
+    def close(x: str, y: str, need: float) -> bool:
+        wx, wy = set(norm(x).split()), set(norm(y).split())
+        return bool(wx and wy) and len(wx & wy) / min(len(wx), len(wy)) >= need
+
     def same(a: Track, b: Track) -> bool:
-        ta, tb = set(norm(a.title).split()), set(norm(b.title).split())
-        return bool(ta and tb) and len(ta & tb) / min(len(ta), len(tb)) >= 0.6
+        # "Intro" by two different artists are two songs; an unknown artist ("ID") can't tell them apart
+        unknown = lambda t: not norm(t.artist) or norm(t.artist) in ("id", "unknown")
+        return close(a.title, b.title, 0.6) and (unknown(a) or unknown(b) or close(a.artist, b.artist, 0.5))
 
     out = list(listed)
     for f in found:

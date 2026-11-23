@@ -106,7 +106,10 @@ def setup_cookies(cfg: dict, args) -> None:
             os.chmod(COOKIES_PATH, 0o600)
             print(f"Saved YouTube cookies to {COOKIES_PATH}; later runs use them automatically.")
     browser = args.cookies_from_browser or yt.get("cookies_from_browser")
-    file = yt.get("cookies") or (str(COOKIES_PATH) if COOKIES_PATH.is_file() else None)
+    if args.cookies:                    # given on the command line: it beats the config file
+        file = str(COOKIES_PATH)
+    else:
+        file = yt.get("cookies") or (str(COOKIES_PATH) if COOKIES_PATH.is_file() else None)
     if browser and not args.cookies:
         use_cookies(browser=browser)
     elif file:
@@ -118,12 +121,16 @@ def export_cookies(browser: str | None) -> int:
     from .tracklist import export_youtube_cookies
     print(f"Looking for YouTube cookies in {browser or 'your browsers'}…")
     try:
-        r = export_youtube_cookies(COOKIES_PATH, browser)
+        r = export_youtube_cookies(COOKIES_PATH, browser, keep_signed_in=True)
     except RuntimeError as e:
         print("No usable YouTube cookies found:")
         print("\n".join("  " + line for line in str(e).splitlines()))
         print("\nSign in to youtube.com in Firefox (its cookies can always be read), close it, then run this again.\n"
               "Chrome and Edge lock their cookies while open, and newer Chrome encrypts them for itself only.")
+        return 1
+    if r.get("kept"):
+        print(f"{r['browser']} isn't signed in to YouTube, so the signed-in cookies already in "
+              f"{COOKIES_PATH} were kept. Sign in to youtube.com in that browser first to replace them.")
         return 1
     print(f"Found {r['cookies']} YouTube cookies in {r['browser']}"
           + ("" if r["signed_in"] else " (not signed in to YouTube, so they may not help)"))
@@ -159,11 +166,30 @@ def check() -> int:
     return 0 if ok else 1
 
 
-def mix_folder(cfg: dict, title: str) -> str:
+def mix_folder(cfg: dict, title: str, create: bool = True) -> str:
     from .soulseek import safe_name
     d = os.path.join(os.path.expandvars(os.path.expanduser(cfg["download_dir"])), safe_name(title))
-    os.makedirs(d, exist_ok=True)
+    if create:
+        os.makedirs(d, exist_ok=True)
     return d
+
+
+def parse_only(spec: str) -> set[int]:
+    """--only '3,5,9-12' -> {3, 5, 9, 10, 11, 12}. Raises ValueError with a readable message."""
+    keep = set()
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
+        lo, sep, hi = part.partition("-")
+        if not lo.strip().isdigit() or (sep and not hi.strip().isdigit()):
+            raise ValueError(f"--only takes track numbers like 3,5,9-12, not {part!r}")
+        a, b = int(lo), int(hi) if sep else int(lo)
+        if b < a or b - a > 10_000:
+            raise ValueError(f"--only: {part!r} isn't a valid range")
+        keep.update(range(a, b + 1))
+    if not keep:
+        raise ValueError("--only needs at least one track number")
+    return keep
 
 
 async def run(args) -> int:
@@ -178,6 +204,13 @@ async def run(args) -> int:
         cfg["soundcloud"]["fallback"] = False
     if args.no_mp3:
         cfg["convert"]["mp3"] = False
+    keep = None
+    if args.only:
+        try:
+            keep = parse_only(args.only)
+        except ValueError as e:
+            console.print(f"[red]{esc(str(e))}[/]")
+            return 1
     setup_cookies(cfg, args)
 
     try:
@@ -193,7 +226,13 @@ async def run(args) -> int:
         return 3
     header(args.title or tl.source_title, args.url)
 
-    out_dir = mix_folder(cfg, args.title or tl.source_title)
+    title = args.title or tl.source_title
+    out_dir = mix_folder(cfg, title, create=not args.dry_run)      # a dry run leaves the library alone
+    if args.dry_run:
+        from .soulseek import safe_name
+        work = os.path.join(CONFIG_DIR, "identify", safe_name(title))
+    else:
+        work = os.path.join(out_dir, ".identify")
     ic = cfg["identify"]
     mode = "always" if args.identify else "never" if (args.no_identify or not ic.get("auto", True)) else "auto"
     why = None if args.tracklist else identify_reason(tl, mode, ic)
@@ -201,8 +240,7 @@ async def run(args) -> int:
     if why:
         console.print(f"[yellow]Identifying songs from the audio[/] [dim]({esc(why)})[/]")
         with IdentifyProgress() as ip:
-            maybe, id_complete = await identify_into(tl, args.url, os.path.join(out_dir, ".identify"), ic,
-                                                     ip.on_audio, ip.on_clips)
+            maybe, id_complete = await identify_into(tl, args.url, work, ic, ip.on_audio, ip.on_clips)
         if not id_complete:
             console.print("[yellow]Shazam kept rate-limiting, so identification stopped early.[/] "
                           "Run the same command again later: it carries on from where it stopped.")
@@ -213,6 +251,13 @@ async def run(args) -> int:
         console.print()
 
     tracklist_table(tl)
+    if args.dry_run:
+        if why and id_complete and not args.keep_audio:
+            shutil.rmtree(work, ignore_errors=True)
+        if not tl.tracks:
+            console.print("[red]No tracks found.[/] Pass --tracklist FILE with 'Artist - Title' lines, or try --identify.")
+            return 1
+        return 0
     with open(os.path.join(out_dir, "tracklist.txt"), "w", encoding="utf-8") as f:
         f.write(f"{tl.source_title}\n{args.url}\nsource: {tl.found_in}\n\n")
         f.writelines(f"{t.index:02d}. {t.label}\n" for t in tl.tracks)
@@ -220,27 +265,28 @@ async def run(args) -> int:
     if not tl.tracks:
         console.print("[red]No tracks found.[/] Pass --tracklist FILE with 'Artist - Title' lines, or try --identify.")
         return 1
-    if args.dry_run:
-        return 0
     tracks = tl.tracks
-    if args.only:
-        keep = {int(x) for x in args.only.split(",")}
+    if keep:
         tracks = [t for t in tl.tracks if t.index in keep]
+        if not tracks:
+            console.print(f"[red]--only {esc(args.only)} matches none of the {len(tl.tracks)} tracks.[/]")
+            return 1
 
     from .soulseek import Downloader
+    eng = Engine(cfg, None)                    # fails early (no ffmpeg...) before anything connects
     dl = Downloader(cfg, os.path.expandvars(os.path.expanduser(cfg["download_dir"])))
     with console.status(f"Connecting to Soulseek as {cfg['soulseek']['username']}…"):
         try:
-            await dl.__aenter__()
+            await dl.__aenter__()              # cleans up after itself when it fails
         except Exception as e:
             if not (cfg["youtube"]["fallback"] or cfg["soundcloud"]["fallback"]):
                 console.print(f"[red]Soulseek login failed:[/] {esc(str(e))}")
                 return 1
             console.print(f"[yellow]Soulseek login failed ({esc(str(e))}); using YouTube/SoundCloud only.[/]")
             dl = None
-    eng = Engine(cfg, dl)
     results = {}
     try:
+        eng.dl = dl
         with DownloadProgress(tracks) as ui:
             eng.on_status = ui.status
             if dl:
@@ -263,7 +309,10 @@ async def run(args) -> int:
     finally:
         if dl:
             with console.status("Disconnecting…"):
-                await dl.__aexit__(None, None, None)
+                try:
+                    await dl.__aexit__(None, None, None)
+                except Exception as e:             # the downloads are done: still write the playlist
+                    log.warning("Soulseek disconnect failed: %s", e)
 
     if not args.keep_audio and id_complete:
         shutil.rmtree(os.path.join(out_dir, ".identify"), ignore_errors=True)
@@ -315,7 +364,8 @@ def sync(args) -> int:
         p = sy.plan(library, dest, mp3_only=args.mp3_only, mirror=args.mirror)
     console.print(f"[bold]{esc(library)}[/] → [bold]{esc(dest)}[/]")
     console.print(f"{len(p.copy)} to copy ({p.bytes / 1e6:,.0f} MB), {p.same} already there"
-                  + (f", {len(p.remove)} in the destination but not in the source" if args.mirror else "")
+                  + (f", {len(p.remove)} in the destination but not in the source"
+                     + (" (or replaced there by its MP3 copy)" if args.mp3_only else "") if args.mirror else "")
                   + (", MP3 copies instead of lossless files" if args.mp3_only else ""))
     probe = dest
     while not os.path.exists(probe) and os.path.dirname(probe) != probe:
@@ -353,11 +403,16 @@ def sync(args) -> int:
         errors = sy.run(p, dest, lambda done, name: bar.update(task, completed=done, name=name[:50]))
     for f, e in errors[:20]:
         console.print(f"  [red]✗[/] {esc(os.path.relpath(f, library) if f.startswith(library) else f)} [dim]— {esc(e)}[/]")
-    ok = len(p.copy) + len(p.remove) - len(errors)
-    console.print(f"[bold {'yellow' if errors else 'green'}]Synced[/] {ok} files"
+    if len(errors) > 20:
+        console.print(f"  [dim]… and {len(errors) - 20} more[/]")
+    done = [f"copied {p.copied}"] + ([f"deleted {p.removed}"] if p.remove else []) \
+        + ([f"rewrote {p.rewritten} playlists"] if p.playlists else []) \
+        + ([f"kept {len(p.kept)} the source has after all"] if p.kept else [])
+    console.print(f"[bold {'yellow' if errors else 'green'}]Synced:[/] " + ", ".join(done)
                   + (f", {len(errors)} failed" if errors else "")
                   + (". [dim]Eject the drive before unplugging it.[/]"
-                     if os.path.splitdrive(lib)[0] != os.path.splitdrive(dst)[0] else "."))
+                     if os.path.splitdrive(os.path.abspath(library))[0].lower() != os.path.splitdrive(dst)[0].lower()
+                     else "."))
     return 2 if errors else 0
 
 
@@ -375,7 +430,7 @@ def main() -> None:
     p.add_argument("--tracklist", help="text file with 'Artist - Title' lines (skip auto-detection)")
     p.add_argument("--identify", action="store_true", help="always identify songs from the audio")
     p.add_argument("--no-identify", action="store_true", help="never identify from audio")
-    p.add_argument("--only", help="comma-separated track numbers to download, e.g. 1,4,7")
+    p.add_argument("--only", help="track numbers to download, e.g. 1,4,7 or 3-9")
     p.add_argument("--dry-run", action="store_true", help="show the tracklist, don't download")
     p.add_argument("--keep-audio", action="store_true", help="keep the downloaded mix audio")
     p.add_argument("--no-youtube", action="store_true", help="don't fall back to YouTube for tracks Soulseek lacks")

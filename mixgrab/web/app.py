@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -57,11 +58,45 @@ def make_session() -> str:
     return f"{body}.{sign('s:' + body)}"
 
 
-def session_ok(tok: Optional[str]) -> bool:
+def _live(exp: str) -> bool:
+    # isdigit() also accepts e.g. '²', which int() then rejects
+    return exp.isascii() and exp.isdecimal() and len(exp) < 12 and int(exp) > time.time()
+
+
+def _same(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode(), b.encode())      # bytes: str raises TypeError on non-ASCII
+
+
+# Sessions signed out before they expired: nonce -> expiry. Kept on disk so a restart doesn't revive them.
+REVOKED_FILE = S.DATA / "revoked.json"
+try:
+    REVOKED: dict[str, int] = {k: int(v) for k, v in json.loads(REVOKED_FILE.read_text()).items()}
+except (OSError, ValueError, TypeError, AttributeError):
+    REVOKED = {}
+
+
+def _session_parts(tok: Optional[str]) -> Optional[tuple[str, str]]:
     if not tok or tok.count(".") != 2:
-        return False
+        return None
     exp, nonce, sig = tok.split(".")
-    return exp.isdigit() and int(exp) > time.time() and hmac.compare_digest(sig, sign(f"s:{exp}.{nonce}"))
+    if not (_live(exp) and _same(sig, sign(f"s:{exp}.{nonce}"))) or nonce in REVOKED:
+        return None
+    return exp, nonce
+
+
+def session_ok(tok: Optional[str]) -> bool:
+    return _session_parts(tok) is not None
+
+
+def revoke(exp: str, nonce: str):
+    now = time.time()
+    for k in [k for k, v in REVOKED.items() if v < now]:
+        del REVOKED[k]
+    REVOKED[nonce] = int(exp)
+    tmp = REVOKED_FILE.with_suffix(".tmp")
+    with os.fdopen(os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600), "w") as f:
+        json.dump(REVOKED, f)
+    os.replace(tmp, REVOKED_FILE)
 
 
 def link(kind: str, ident: str) -> str:
@@ -70,7 +105,7 @@ def link(kind: str, ident: str) -> str:
 
 
 def link_ok(kind: str, ident: str, exp: str, sig: str) -> bool:
-    return exp.isdigit() and int(exp) > time.time() and hmac.compare_digest(sig, sign(f"{kind}:{ident}:{exp}"))
+    return _live(exp) and _same(sig, sign(f"{kind}:{ident}:{exp}"))
 
 
 def require_owner(request: Request):
@@ -97,10 +132,20 @@ async def security_headers(request: Request, call_next):
 # Failed sign-ins per client IP. No site-wide cap: anyone could use one to lock the owner out, and the
 # 24-character random password is what actually stops guessing.
 FAILS: dict[str, deque] = defaultdict(deque)
+MAX_TRACKED_IPS = 5000
 
 
 def client_ip(request: Request) -> str:
-    return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "?")
+    # uvicorn has already taken the address from X-Forwarded-For, but only when the connection came from
+    # a trusted proxy (Caddy; see FORWARDED_ALLOW_IPS). Headers a client sends itself are not trusted.
+    return request.client.host if request.client else "?"
+
+
+def _prune_fails(now: float):
+    for k in [k for k, q in FAILS.items() if not q or now - q[-1] > 900]:
+        del FAILS[k]
+    while len(FAILS) >= MAX_TRACKED_IPS:          # still flooded: forget the IP that failed longest ago
+        del FAILS[min(FAILS, key=lambda k: FAILS[k][-1])]
 
 
 class Login(BaseModel):
@@ -111,17 +156,17 @@ class Login(BaseModel):
 @app.post("/api/login")
 async def login(body: Login, request: Request, response: Response):
     ip, now = client_ip(request), time.time()
-    q = FAILS[ip]
+    q = FAILS.get(ip) or deque()
     while q and now - q[0] > 900:
         q.popleft()
     if not q:
         FAILS.pop(ip, None)                 # don't keep an entry for every IP that ever tried
     if len(q) >= 5:
         raise HTTPException(429, "Too many attempts. Try again in 15 minutes.")
-    # compare bytes: compare_digest raises TypeError on non-ASCII str
-    ok = hmac.compare_digest(body.username.strip().lower().encode(), S.OWNER_USER.lower().encode()) & \
-        hmac.compare_digest(body.password.encode(), S.OWNER_PASSWORD.encode())
+    ok = _same(body.username.strip().lower(), S.OWNER_USER.lower()) & _same(body.password, S.OWNER_PASSWORD)
     if not ok:
+        if ip not in FAILS and len(FAILS) >= MAX_TRACKED_IPS:
+            _prune_fails(now)
         FAILS[ip].append(now)
         await _sleep(1.0)
         raise HTTPException(401, "Wrong username or password.")
@@ -135,8 +180,12 @@ async def _sleep(s):
     await asyncio.sleep(s)
 
 
-@app.post("/api/logout")
-async def logout(response: Response):
+@app.post("/api/logout", dependencies=[Depends(require_owner)])
+async def logout(request: Request, response: Response):
+    """Signs this session out for good: the cookie stops working even if a copy of it survives."""
+    parts = _session_parts(request.cookies.get(COOKIE))
+    if parts:
+        revoke(*parts)
     response.delete_cookie(COOKIE, path="/")
     return {"ok": True}
 
@@ -178,20 +227,19 @@ async def capture_login():
 # ---------------- YouTube cookies ----------------
 @app.post("/api/youtube-cookies", dependencies=[Depends(require_owner)])
 async def upload_cookies(request: Request):
-    raw = await request.body()
+    raw = await _read_capped(request, MAX_SQLITE)
     if raw.startswith(b"SQLite format 3\x00"):     # Firefox's own cookies.sqlite, uploaded as is
         return await asyncio.to_thread(_cookies_from_firefox_db, raw)
-    if len(raw) > 1_000_000:
+    if len(raw) > MAX_COOKIES_TXT:
         raise HTTPException(413, "That file is too big for a cookies.txt.")
-    text = raw.decode("utf-8", "replace")
-    rows = [l.split("\t") for l in text.splitlines()
-            if l.strip() and (not l.startswith("#") or l.startswith("#HttpOnly_"))]
-    yt = [r for r in rows if len(r) == 7 and ("youtube.com" in r[0] or "google.com" in r[0])]
+    lines = [l for l in raw.decode("utf-8", "replace").splitlines()
+             if l.strip() and (not l.startswith("#") or l.startswith("#HttpOnly_"))]
+    yt = [l for l in lines if len(l.split("\t")) == 7 and _yt_domain(l.split("\t")[0])]
     if not yt:
         raise HTTPException(400, "No YouTube cookies found. Export cookies.txt (Netscape format) "
                                  "from a browser tab where you are signed in to youtube.com.")
-    if not text.startswith("# Netscape HTTP Cookie File"):
-        text = "# Netscape HTTP Cookie File\n" + text
+    # keep only the YouTube/Google rows, like the Firefox upload: the server has no use for the rest
+    text = "# Netscape HTTP Cookie File\n" + "\n".join(yt) + "\n"
     S.COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = S.COOKIES_FILE.with_suffix(".tmp")
     with os.fdopen(os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600), "w", encoding="utf-8") as f:
@@ -202,17 +250,44 @@ async def upload_cookies(request: Request):
     return {"ok": True, "cookies": len(yt)}
 
 
+MAX_COOKIES_TXT = 1_000_000
+MAX_SQLITE = 64_000_000
+
+
+def _yt_domain(domain: str) -> bool:
+    d = domain.removeprefix("#HttpOnly_").lstrip(".").lower()
+    return any(d == x or d.endswith("." + x) for x in ("youtube.com", "google.com"))
+
+
+async def _read_capped(request: Request, limit: int) -> bytes:
+    """The request body, refused as soon as it is bigger than limit (instead of buffering it all first)."""
+    try:
+        if int(request.headers.get("content-length") or 0) > limit:
+            raise HTTPException(413, "That file is too big.")
+    except ValueError:
+        raise HTTPException(400, "bad Content-Length")
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > limit:
+            raise HTTPException(413, "That file is too big.")
+    return bytes(buf)
+
+
 def _cookies_from_firefox_db(raw: bytes) -> dict:
     """Keep only the YouTube/Google cookies from an uploaded Firefox cookies.sqlite; the database itself is discarded."""
-    if len(raw) > 64_000_000:
+    if len(raw) > MAX_SQLITE:
         raise HTTPException(413, "That cookies.sqlite is too big.")
     with tempfile.TemporaryDirectory() as d:
         Path(d, "cookies.sqlite").write_bytes(raw)
         try:
-            r = tlmod.export_youtube_cookies(S.COOKIES_FILE, "firefox", profile=d)
+            r = tlmod.export_youtube_cookies(S.COOKIES_FILE, "firefox", profile=d, keep_signed_in=True)
         except RuntimeError:
             raise HTTPException(400, "No YouTube cookies in that file. Sign in to youtube.com in Firefox, "
                                      "close Firefox, then upload cookies.sqlite again.")
+    if r.get("kept"):
+        return {"ok": True, "cookies": r["cookies"],
+                "warning": "That Firefox isn't signed in to YouTube, so the signed-in cookies already saved were kept."}
     os.chmod(S.COOKIES_FILE, 0o600)
     mgr.apply_cookies()
     if not r["signed_in"]:
@@ -306,6 +381,8 @@ async def retry_track(job_id: str, index: int, body: TrackEdit):
     job = get_job(job_id)
     if not any(t["index"] == index for t in job["tracks"]):
         raise HTTPException(404, "no such track")
+    if mgr.busy(job, index):
+        raise HTTPException(409, "That track is still being fetched.")
     await mgr.retry(job, index, body.artist, body.title)
     return {"ok": True}
 
@@ -314,7 +391,10 @@ async def retry_track(job_id: str, index: int, body: TrackEdit):
 async def add_track(job_id: str, body: TrackEdit):
     if not (body.artist and body.title):
         raise HTTPException(400, "artist and title are required")
-    await mgr.add_track(get_job(job_id), body.artist, body.title)
+    job = get_job(job_id)
+    if job["status"] in ("queued", "reading", "identifying"):     # the tracklist is about to be replaced
+        raise HTTPException(409, "Wait until the tracklist is ready.")
+    await mgr.add_track(job, body.artist, body.title)
     return {"ok": True}
 
 
@@ -355,8 +435,13 @@ async def zip_dl(job_id: str, exp: str = "", sig: str = ""):
 
 # ---------------- page ----------------
 @app.get("/healthz")
-async def healthz():
-    return {"ok": True}
+async def healthz(request: Request):
+    """Liveness for Docker. Asked from inside the container (the deploy check), it also says whether
+    the parts a download needs are ready; the public URL never shows that."""
+    if request.client is None or request.client.host not in ("127.0.0.1", "::1"):
+        return {"ok": True}
+    return {"ok": True, "soulseek": getattr(mgr, "slsk_state", "?"),
+            "youtube_cookies": S.COOKIES_FILE.is_file(), "pot_provider": bool(S.POT_URL)}
 
 
 @app.get("/robots.txt")
@@ -377,8 +462,11 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     for noisy in ("aioslsk", "shazamio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Believe X-Forwarded-For only from the reverse proxy: by default loopback and the private ranges
+    # Docker networks use (Caddy reaches us over one). Clients connecting from anywhere else can't fake it.
+    trusted = os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
     uvicorn.run(app, host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "8080")),
-                proxy_headers=True, forwarded_allow_ips="*", log_level="info")
+                proxy_headers=True, forwarded_allow_ips=trusted, log_level="info")
 
 
 if __name__ == "__main__":
