@@ -10,7 +10,7 @@ from typing import Optional
 import yt_dlp
 
 from .soulseek import VERSION_WORDS, norm, strip_parens, tokens
-from .tracklist import Track, YDL_EXTRA
+from .tracklist import Track, YDL_EXTRA, run_ydl
 
 log = logging.getLogger("mixgrab")
 LONG_WORDS = {"mix", "set", "dj", "podcast", "album", "compilation", "hour", "hours", "megamix", "full",
@@ -76,9 +76,7 @@ def download(entry: dict, dest_noext: str, ffmpeg: str, quality: str = "0",
                                {"key": "FFmpegMetadata"}],
             "progress_hooks": [lambda d: progress(d.get("downloaded_bytes") or 0,
                                                   d.get("total_bytes") or d.get("total_bytes_estimate") or 0)]}
-    opts.update(YDL_EXTRA)
-    with yt_dlp.YoutubeDL(opts) as y:
-        y.download([url])
+    run_ydl(opts, lambda y: y.download([url]))
     out = dest_noext + ".yt.mp3"
     if not os.path.exists(out):
         raise RuntimeError("YouTube download produced no MP3")
