@@ -29,4 +29,4 @@ jobs:
             docker exec mixgrab yt-dlp -v --simulate --no-cache-dir \
               --extractor-args "youtubepot-bgutilhttp:base_url=http://mixgrab-pot:4416" \
               "https://www.youtube.com/watch?v=$VIDEO" 2>&1 \
-              | grep -iE 'plugin|pot|po token|bgutil|client|ERROR|WARNING|sign in' | grep -viE 'cookie' | head -60 || true
+              | grep -E 'youtube|ERROR|WARNING' | cut -c1-220 | head -80 || true
