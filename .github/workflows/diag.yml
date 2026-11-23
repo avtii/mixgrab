@@ -1,0 +1,32 @@
+name: Diagnose YouTube on the server
+
+on:
+  workflow_dispatch:
+    inputs:
+      video:
+        description: YouTube video ID to test
+        default: t6oJzp6SwNo
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1.2.0
+        env:
+          VIDEO: ${{ inputs.video }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER || vars.DEPLOY_USER }}
+          port: ${{ secrets.DEPLOY_PORT || vars.DEPLOY_PORT || '22' }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          passphrase: ${{ secrets.DEPLOY_PASSPHRASE }}
+          envs: VIDEO
+          script: |
+            docker ps --filter name=mixgrab --format '{{.Names}} {{.Status}}'
+            docker exec mixgrab pip show bgutil-ytdlp-pot-provider yt-dlp 2>/dev/null | grep -E '^(Name|Version)'
+            docker exec mixgrab python -c "import urllib.request;print(urllib.request.urlopen('http://mixgrab-pot:4416/ping',timeout=5).read()[:200])" || true
+            # verbose yt-dlp, filtered to the lines about plugins, PO tokens and errors
+            docker exec mixgrab yt-dlp -v --simulate --no-cache-dir \
+              --extractor-args "youtubepot-bgutilhttp:base_url=http://mixgrab-pot:4416" \
+              "https://www.youtube.com/watch?v=$VIDEO" 2>&1 \
+              | grep -iE 'plugin|pot|po token|bgutil|client|ERROR|WARNING|sign in' | grep -viE 'cookie' | head -60 || true
