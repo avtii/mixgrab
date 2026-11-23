@@ -101,6 +101,11 @@ mixgrab --sync C:\Some\Folder E:\Backup\Copy  # any folder into any folder
 - With `--mp3-only`, a lossless file is skipped when its MP3 copy exists, and `playlist.m3u` points at the MP3s. Lossless files with no MP3 copy are still copied.
 - The scratch `.identify` folders and unfinished downloads are left out.
 - mixgrab checks there is enough free space before starting. Eject the drive before unplugging it.
+- The copy runs at the lowest I/O priority, so other programs come first. If the mouse or keyboard still stalls while syncing (they can share a USB controller with the stick), cap the speed: `mixgrab --sync D --sync-speed 10` (MB/s), or once for all syncs in `config.toml`:
+  ```
+  [sync]
+  speed = 10
+  ```
 
 ### If YouTube asks you to sign in
 Sometimes YouTube refuses with "Sign in to confirm you're not a bot". This mostly happens on VPNs and servers. Give mixgrab your YouTube cookies once:

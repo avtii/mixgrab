@@ -397,10 +397,24 @@ def sync(args) -> int:
     if not (p.copy or p.remove or p.playlists):
         console.print("[green]Already in sync.[/]")
         return 0
+    speed = args.sync_speed
+    if speed is None and CONFIG_PATH.exists():      # [sync] speed in config.toml; never create a config just for this
+        speed = load_config().get("sync", {}).get("speed", 0)
+    try:
+        speed = float(speed or 0)
+    except (TypeError, ValueError):
+        console.print(f"[red]sync speed must be a number of MB/s, not {esc(str(speed))}.[/]")
+        return 1
+    if speed < 0:
+        console.print("[red]sync speed can't be negative.[/]")
+        return 1
+    sy.go_easy()                                    # lowest I/O priority: the mouse and keyboard come first
+    if speed:
+        console.print(f"[dim]Copying at up to {speed:g} MB/s.[/]")
     with Progress(TextColumn("{task.description}"), BarColumn(bar_width=30), DownloadColumn(),
                   TransferSpeedColumn(), TextColumn("[dim]{task.fields[name]}"), console=console) as bar:
         task = bar.add_task("Copying", total=p.bytes or 1, name="")
-        errors = sy.run(p, dest, lambda done, name: bar.update(task, completed=done, name=name[:50]))
+        errors = sy.run(p, dest, lambda done, name: bar.update(task, completed=done, name=name[:50]), speed=speed)
     for f, e in errors[:20]:
         console.print(f"  [red]✗[/] {esc(os.path.relpath(f, library) if f.startswith(library) else f)} [dim]— {esc(e)}[/]")
     if len(errors) > 20:
@@ -441,6 +455,9 @@ def main() -> None:
                         "files, then exit. A bare drive letter as DEST (D or D:) means D:/<source folder name>")
     p.add_argument("--mp3-only", action="store_true", help="with --sync: send the MP3 copy instead of FLAC/WAV when there is one")
     p.add_argument("--mirror", action="store_true", help="with --sync: also delete files in DEST that the source no longer has (asks first)")
+    p.add_argument("--sync-speed", type=float, metavar="MB",
+                   help="with --sync: copy at most this many MB/s (e.g. 10) if the mouse or keyboard stalls "
+                        "during a sync; 0 = no cap. Set it once in config.toml as [sync] speed = 10")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--export-cookies", nargs="?", const="auto", metavar="BROWSER",
                    help="find your YouTube cookies in a browser (all of them, or the one named), save them to "
