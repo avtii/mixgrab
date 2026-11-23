@@ -55,6 +55,10 @@ YTDLP_COOKIES = _env("YTDLP_COOKIES")                 # optional cookies.txt for
 COOKIES_FILE = Path(YTDLP_COOKIES) if YTDLP_COOKIES else DATA / "youtube-cookies.txt"
 # bgutil PO-token provider (sidecar): lets yt-dlp pass YouTube's bot check without cookies
 POT_URL = _env("POT_URL")
+# In-page YouTube sign-in: a Chromium container streamed at LOGIN_PATH (Caddy checks the owner session first).
+# mixgrab reads that Chromium's profile (mounted read-only) to take the signed-in YouTube cookies.
+BROWSER_PROFILE = _env("BROWSER_PROFILE")             # e.g. /browser/Default
+LOGIN_PATH = _env("LOGIN_PATH", "/yt-login/")
 
 MATCH = {
     "prefer_lossless": _env("PREFER_LOSSLESS", "1") == "1",

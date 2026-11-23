@@ -102,6 +102,9 @@ async function refreshMe() {
     $("#ytc span:last-child").textContent = yc
       ? `YouTube cookies · ${new Date(yc * 1000).toLocaleDateString()}` : "Add YouTube cookies";
     $("#ytc-del").classList.toggle("hidden", !yc);
+    loginPath = me.youtube_login;
+    $("#ytc-login").classList.toggle("hidden", !loginPath);
+    if (loginPath && !$("#ytc-dlg").open) $("#ytc-more").open = false;
   } catch {}
 }
 
@@ -117,6 +120,20 @@ $("#ytc-copy").addEventListener("click", async () => {
   catch { toast(FF_DIR); }
 });
 $("#ytc").addEventListener("click", () => $("#ytc-dlg").showModal());
+let loginPath = null;
+$("#ytc-open").addEventListener("click", () => window.open(loginPath, "mixgrab-yt-login"));
+$("#ytc-grab").addEventListener("click", async (e) => {
+  const b = e.currentTarget, label = b.textContent;
+  b.disabled = true;
+  b.textContent = "Checking… (up to a minute)";
+  try {
+    const d = await api("/api/youtube-login/capture", { method: "POST" });
+    $("#ytc-dlg").close();
+    toast(`Signed in. Using ${d.cookies} YouTube cookies. Press Resume on failed jobs.`);
+    refreshMe();
+  } catch (err) { toast(err.message); }
+  finally { b.disabled = false; b.textContent = label; }
+});
 $("#ytc-pick").addEventListener("click", () => $("#ytc-file").click());
 $("#ytc-del").addEventListener("click", async () => {
   try { await api("/api/youtube-cookies", { method: "DELETE" }); toast("YouTube cookies removed."); refreshMe(); }

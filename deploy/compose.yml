@@ -9,9 +9,11 @@ services:
     environment:
       MIXGRAB_DATA: /data
       YTDLP_COOKIES: ${YTDLP_COOKIES:-}
-      POT_URL: http://mixgrab-pot:4416   # YouTube PO tokens, so no cookies are needed
+      POT_URL: http://mixgrab-pot:4416   # YouTube PO tokens (needed alongside cookies by some clients)
+      BROWSER_PROFILE: /browser/Default  # the sign-in browser's Chromium profile, for its YouTube cookies
     volumes:
       - ./data:/data
+      - ./browser/.config/chromium:/browser:ro
     ports:
       - "61234:61234"        # Soulseek peers connect here (plain)
       - "61235:61235"        # Soulseek obfuscated port
@@ -27,6 +29,27 @@ services:
     init: true
     networks: [burrball_default]
     mem_limit: 512m
+
+  # The YouTube sign-in browser: Chromium streamed to the web page at /yt-login/. Internal only, no ports;
+  # Caddy sends /yt-login/* here only after mixgrab's /api/authcheck accepts the owner session.
+  mixgrab-browser:
+    image: lscr.io/linuxserver/chromium:latest
+    container_name: mixgrab-browser
+    restart: unless-stopped
+    environment:
+      PUID: "1000"                       # same uid as mixgrab, so it can read the profile
+      PGID: "1000"
+      TZ: Etc/UTC
+      SUBFOLDER: /yt-login/
+      TITLE: mixgrab - YouTube sign-in
+      # basic password store: cookies stay readable by mixgrab (no desktop keyring in the container)
+      CHROME_CLI: --password-store=basic https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F
+    volumes:
+      - ./browser:/config
+    shm_size: 1gb
+    security_opt: [seccomp:unconfined]
+    networks: [burrball_default]
+    mem_limit: 1500m
 
 networks:
   burrball_default:

@@ -111,7 +111,16 @@
 <dialog id="ytc-dlg" class="dlg">
   <form method="dialog" class="dlg-x"><button class="btn link" aria-label="Close">✕</button></form>
   <h3>YouTube cookies</h3>
-  <p class="muted">YouTube blocks servers unless they send the cookies of a signed-in browser. Pick one way:</p>
+  <p class="muted">YouTube blocks servers unless they send the cookies of a signed-in browser.</p>
+  <div id="ytc-login" class="dlg-login hidden">
+    <ol class="dlg-steps">
+      <li><button id="ytc-open" class="btn primary" type="button">Open YouTube sign-in</button>
+        <span class="muted small">A browser running on this server opens in a new tab. Sign in to YouTube there. A spare Google account is safest: YouTube can flag accounts that are used for downloading.</span></li>
+      <li><button id="ytc-grab" class="btn ghost" type="button">I'm signed in, use it</button>
+        <span class="muted small">mixgrab takes the YouTube cookies from that browser and keeps them fresh for as long as it stays signed in.</span></li>
+    </ol>
+  </div>
+  <details id="ytc-more" class="dlg-more" open><summary>Upload a cookie file instead</summary>
   <ol class="dlg-steps">
     <li><b>Firefox (easiest).</b> Sign in to youtube.com in Firefox, then <b>close Firefox</b>. Upload this file from your Firefox profile folder:
       <div class="dlg-path"><code id="ytc-ffpath"></code><button id="ytc-copy" class="btn ghost" type="button">Copy folder</button></div>
@@ -120,9 +129,10 @@
     <li><b>Any browser.</b> Export <code>cookies.txt</code> with an extension such as <i>Get cookies.txt LOCALLY</i> and upload it.</li>
   </ol>
   <p class="muted small">Chrome and Edge encrypt their cookie file, so it can't be uploaded directly. Use option 2 or 3 for them.</p>
+  <div class="dlg-actions"><button id="ytc-pick" class="btn ghost" type="button">Choose file…</button></div>
+  </details>
   <div class="dlg-actions">
     <button id="ytc-del" class="btn ghost danger hidden" type="button">Remove cookies</button>
-    <button id="ytc-pick" class="btn primary" type="button">Choose file…</button>
   </div>
 </dialog>
 <div id="toast" class="toast"></div>

@@ -211,3 +211,8 @@ button.ytc:hover span:last-child { color: var(--ink); text-decoration: underline
 .dlg code { background: var(--hover); border-radius: 6px; padding: 2px 6px; font-size: 12.5px; }
 .dlg .small { font-size: 12.5px; }
 .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.dlg-steps li .btn { margin-right: 10px; margin-bottom: 4px; }
+.dlg-steps li .small { display: block; }
+.dlg-more { margin: 4px 0 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.dlg-more summary { cursor: pointer; color: var(--muted); margin-bottom: 10px; }
+.dlg-more summary:hover { color: var(--ink); }

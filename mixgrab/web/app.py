@@ -146,7 +146,32 @@ async def me():
     return {"user": S.OWNER_USER, "soulseek": {"state": mgr.slsk_state, "error": mgr.slsk_error,
                                                "username": S.SLSK["username"]},
             "cache": u, "link_ttl_min": S.LINK_TTL_MIN,
-            "youtube_cookies": (S.COOKIES_FILE.stat().st_mtime if S.COOKIES_FILE.is_file() else None)}
+            "youtube_cookies": (S.COOKIES_FILE.stat().st_mtime if S.COOKIES_FILE.is_file() else None),
+            "youtube_login": S.LOGIN_PATH if S.BROWSER_PROFILE else None}
+
+
+@app.get("/api/authcheck")
+async def authcheck(request: Request):
+    """For Caddy forward_auth: only the signed-in owner may reach the YouTube sign-in browser."""
+    if not session_ok(request.cookies.get(COOKIE)):
+        raise HTTPException(401, "login required")
+    return Response(status_code=204)
+
+
+@app.post("/api/youtube-login/capture", dependencies=[Depends(require_owner)])
+async def capture_login():
+    """Take the cookies once the owner has signed in. Chromium writes new cookies to disk within ~30 s, so retry."""
+    last = ""
+    for _ in range(10):
+        try:
+            r = await asyncio.to_thread(mgr.capture_browser_cookies)
+            return {"ok": True, "cookies": r["cookies"]}
+        except RuntimeError as e:
+            last = str(e)
+        await asyncio.sleep(5)
+    log.info("YouTube sign-in capture failed: %s", last.replace("\n", "; ")[:200])
+    raise HTTPException(400, "Not signed in to YouTube yet. Finish signing in in the sign-in window "
+                             "(you should see your avatar on youtube.com), then try again.")
 
 
 # ---------------- YouTube cookies ----------------

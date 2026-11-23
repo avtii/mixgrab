@@ -163,7 +163,8 @@ class _QuietLog:
     def error(self, m): pass
 
 
-def export_youtube_cookies(dest, browser: str | None = None, profile: str | None = None) -> dict:
+def export_youtube_cookies(dest, browser: str | None = None, profile: str | None = None,
+                           keyring: str | None = None, require_signed_in: bool = False) -> dict:
     """Read the YouTube/Google cookies from a browser (or a Firefox profile folder) and save them as cookies.txt.
     Without a browser, tries each installed one and keeps the first that is signed in to YouTube.
     Returns {"browser", "cookies", "signed_in"}; raises RuntimeError with per-browser reasons if none work."""
@@ -172,7 +173,7 @@ def export_youtube_cookies(dest, browser: str | None = None, profile: str | None
     import sys
     for b in ([browser] if browser else [x for x in COOKIE_BROWSERS if x != "safari" or sys.platform == "darwin"]):
         try:
-            jar = extract_cookies_from_browser(b, profile, logger=_QuietLog())
+            jar = extract_cookies_from_browser(b, profile, logger=_QuietLog(), keyring=keyring)
         except Exception as e:
             msg = str(e).lower()
             why = ("locked - close the browser and try again" if "could not copy" in msg
@@ -188,7 +189,7 @@ def export_youtube_cookies(dest, browser: str | None = None, profile: str | None
             continue
         if not signed:
             tried.append(f"{b}: has YouTube cookies but is not signed in to YouTube")
-            if not browser:
+            if not browser or require_signed_in:
                 continue
         out = YoutubeDLCookieJar(str(dest))
         for c in yt:

@@ -74,8 +74,8 @@ class Store:
 def friendly_error(e: Exception) -> str:
     s = str(e).replace("ERROR: ", "").strip()
     if tlmod.is_bot_check(e):
-        return ("YouTube blocked the server with a bot check. Upload YouTube cookies "
-                "(sidebar), then press Resume.")
+        return ("YouTube blocked the server with a bot check. Sign in to YouTube under "
+                "'YouTube cookies' in the sidebar, then press Resume.")
     return s.split(" Use --cookies")[0][:300]
 
 
@@ -105,10 +105,34 @@ class Manager:
         """Point yt-dlp at the uploaded cookies.txt (or stop using it once removed)."""
         tlmod.use_cookies(str(S.COOKIES_FILE) if S.COOKIES_FILE.is_file() else None)
 
+    def capture_browser_cookies(self) -> dict:
+        """Take the signed-in YouTube cookies from the sign-in browser's profile (raises RuntimeError if not signed in)."""
+        if not S.BROWSER_PROFILE:
+            raise RuntimeError("the sign-in browser isn't set up on this server")
+        tmp = S.COOKIES_FILE.with_suffix(".new")
+        r = tlmod.export_youtube_cookies(tmp, "chromium", profile=S.BROWSER_PROFILE, keyring="BASICTEXT",
+                                         require_signed_in=True)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, S.COOKIES_FILE)
+        self.apply_cookies()
+        return r
+
+    async def _browser_cookie_loop(self):
+        """YouTube rotates its cookies; while the sign-in browser stays signed in, keep our copy fresh."""
+        while True:
+            await asyncio.sleep(6 * 3600)
+            try:
+                await asyncio.to_thread(self.capture_browser_cookies)
+                log.info("refreshed YouTube cookies from the sign-in browser")
+            except Exception as e:
+                log.info("sign-in browser: no fresh cookies (%s)", str(e).splitlines()[0][:120])
+
     # ---------- lifecycle ----------
     async def start(self):
         self._spawn(self._saver())
         self._spawn(self._cache_loop())
+        if S.BROWSER_PROFILE:
+            self._spawn(self._browser_cookie_loop())
         self._spawn(self._slsk_loop())
 
     async def stop(self):
