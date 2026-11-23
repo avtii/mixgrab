@@ -130,10 +130,10 @@ jobs:
             # Caddy (burrball stack): (re)write the mixgrab site block when it's missing or outdated, then reload.
             # /yt-login/* goes to the sign-in browser only after mixgrab confirms the owner session.
             CF=/root/burrball/Caddyfile
-            if [ -f "$CF" ] && ! grep -q "mixgrab-block v2" "$CF"; then
+            if [ -f "$CF" ] && ! grep -q "mixgrab-block v3" "$CF"; then
               cp "$CF" "$CF.bak-mixgrab"
               awk -v d="$DOMAIN {" '$0==d{skip=1;next} skip&&$0=="}"{skip=0;next} !skip' "$CF.bak-mixgrab" > "$CF.new"
-              printf '\n%s {\n\t# mixgrab-block v2\n\t@ytlogin path /yt-login /yt-login/*\n\thandle @ytlogin {\n\t\tforward_auth mixgrab:8080 {\n\t\t\turi /api/authcheck\n\t\t}\n\t\treverse_proxy mixgrab-browser:3000\n\t}\n\thandle {\n\t\tencode gzip\n\t\treverse_proxy mixgrab:8080\n\t}\n}\n' "$DOMAIN" >> "$CF.new"
+              printf '\n%s {\n\t# mixgrab-block v3\n\t@ytlogin path /yt-login /yt-login/*\n\thandle @ytlogin {\n\t\tforward_auth mixgrab:8080 {\n\t\t\turi /api/authcheck\n\t\t\theader_up -Upgrade\n\t\t\theader_up -Connection\n\t\t}\n\t\treverse_proxy mixgrab-browser:3000\n\t}\n\thandle {\n\t\tencode gzip\n\t\treverse_proxy mixgrab:8080\n\t}\n}\n' "$DOMAIN" >> "$CF.new"
               cat "$CF.new" > "$CF" && rm -f "$CF.new"     # write in place: the Caddyfile is bind-mounted
               if V=$(docker exec burrball-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) || { echo "$V" | tail -3; false; }; then
                 docker exec burrball-caddy-1 caddy reload --config /etc/caddy/Caddyfile
