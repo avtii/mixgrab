@@ -97,8 +97,27 @@ async function refreshMe() {
     const c = me.cache, used = c.files + c.zips;
     $("#cache i").style.width = Math.min(100, (used / c.budget) * 100).toFixed(1) + "%";
     $("#cache span").textContent = `Cache ${fmtBytes(used)} of ${fmtBytes(c.budget)}`;
+    const yc = me.youtube_cookies;
+    $("#ytc .dot").className = "dot " + (yc ? "ok" : "warn");
+    $("#ytc span:last-child").textContent = yc
+      ? `YouTube cookies · ${new Date(yc * 1000).toLocaleDateString()}` : "Add YouTube cookies";
   } catch {}
 }
+
+$("#ytc").addEventListener("click", () => $("#ytc-file").click());
+$("#ytc-file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  try {
+    const r = await fetch("/api/youtube-cookies", { method: "POST", body: await f.text(),
+      headers: { "Content-Type": "text/plain" }, credentials: "same-origin" });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    toast(`YouTube cookies saved (${d.cookies}). Press Resume on failed jobs.`);
+    refreshMe();
+  } catch (err) { toast(err.message); }
+});
 
 async function refreshHistory() {
   let jobs;
@@ -167,7 +186,7 @@ function renderJob(job) {
 
   const zip = $("#zip-btn");
   if (job.zip_url) { zip.href = job.zip_url; zip.classList.remove("hidden"); } else zip.classList.add("hidden");
-  $("#resume-btn").classList.toggle("hidden", !(job.status === "interrupted" || (job.status === "done" && job.tracks.some((t) => t.state === "expired"))));
+  $("#resume-btn").classList.toggle("hidden", !(job.status === "interrupted" || job.status === "error" || (job.status === "done" && job.tracks.some((t) => t.state === "expired"))));
   $("#del-btn").disabled = ACTIVE.has(job.status);
 
   // phase progress

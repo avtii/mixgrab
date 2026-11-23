@@ -71,6 +71,14 @@ class Store:
         self.db.commit()
 
 
+def friendly_error(e: Exception) -> str:
+    s = str(e).replace("ERROR: ", "").strip()
+    if "confirm you" in s and "bot" in s:
+        return ("YouTube blocked the server with a bot check. Upload YouTube cookies "
+                "(sidebar), then press Resume.")
+    return s.split(" Use --cookies")[0][:300]
+
+
 class Manager:
     def __init__(self):
         self.store = Store(S.DATA / "mixgrab.db")
@@ -90,8 +98,14 @@ class Manager:
         self.slsk_error = ""
         self._dirty: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
-        if S.YTDLP_COOKIES:
-            tlmod.YDL_EXTRA["cookiefile"] = S.YTDLP_COOKIES
+        self.apply_cookies()
+
+    def apply_cookies(self):
+        """Point yt-dlp at the uploaded cookies.txt (or stop using it once removed)."""
+        if S.COOKIES_FILE.is_file():
+            tlmod.YDL_EXTRA["cookiefile"] = str(S.COOKIES_FILE)
+        else:
+            tlmod.YDL_EXTRA.pop("cookiefile", None)
 
     # ---------- lifecycle ----------
     async def start(self):
@@ -216,7 +230,7 @@ class Manager:
             raise
         except Exception as e:
             log.exception("job %s failed", job["id"])
-            job["status"], job["error"] = "error", str(e)[:300]
+            job["status"], job["error"] = "error", friendly_error(e)
         finally:
             self.mark(job)
 
@@ -316,6 +330,7 @@ class Manager:
     def resume(self, job):
         if job["status"] in ACTIVE_JOB:
             return
+        job["error"] = ""
         if not job["tracks"]:
             self._spawn(self._run(job))
         else:

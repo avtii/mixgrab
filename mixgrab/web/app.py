@@ -142,7 +142,39 @@ async def me():
     u = mgr.cache_usage()
     return {"user": S.OWNER_USER, "soulseek": {"state": mgr.slsk_state, "error": mgr.slsk_error,
                                                "username": S.SLSK["username"]},
-            "cache": u, "link_ttl_min": S.LINK_TTL_MIN}
+            "cache": u, "link_ttl_min": S.LINK_TTL_MIN,
+            "youtube_cookies": (S.COOKIES_FILE.stat().st_mtime if S.COOKIES_FILE.is_file() else None)}
+
+
+# ---------------- YouTube cookies ----------------
+@app.post("/api/youtube-cookies", dependencies=[Depends(require_owner)])
+async def upload_cookies(request: Request):
+    raw = await request.body()
+    if len(raw) > 1_000_000:
+        raise HTTPException(413, "That file is too big for a cookies.txt.")
+    text = raw.decode("utf-8", "replace")
+    rows = [l.split("\t") for l in text.splitlines()
+            if l.strip() and (not l.startswith("#") or l.startswith("#HttpOnly_"))]
+    yt = [r for r in rows if len(r) == 7 and ("youtube.com" in r[0] or "google.com" in r[0])]
+    if not yt:
+        raise HTTPException(400, "No YouTube cookies found. Export cookies.txt (Netscape format) "
+                                 "from a browser tab where you are signed in to youtube.com.")
+    if not text.startswith("# Netscape HTTP Cookie File"):
+        text = "# Netscape HTTP Cookie File\n" + text
+    S.COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = S.COOKIES_FILE.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, S.COOKIES_FILE)
+    mgr.apply_cookies()
+    return {"ok": True, "cookies": len(yt)}
+
+
+@app.delete("/api/youtube-cookies", dependencies=[Depends(require_owner)])
+async def delete_cookies():
+    S.COOKIES_FILE.unlink(missing_ok=True)
+    mgr.apply_cookies()
+    return {"ok": True}
 
 
 # ---------------- jobs ----------------

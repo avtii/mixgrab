@@ -51,6 +51,8 @@ CACHE_HIGH = _env("CACHE_HIGH", 0.92, float)          # start cleaning at 92% of
 CACHE_FREE = _env("CACHE_FREE", 0.12, float)          # then delete the oldest 12%
 LINK_TTL_MIN = _env("LINK_TTL_MIN", 60 * 24, int)     # signed file links expire after this
 YTDLP_COOKIES = _env("YTDLP_COOKIES")                 # optional cookies.txt for YouTube
+# where the uploaded YouTube cookies live (YouTube bot-checks datacenter IPs without them)
+COOKIES_FILE = Path(YTDLP_COOKIES) if YTDLP_COOKIES else DATA / "youtube-cookies.txt"
 
 MATCH = {
     "prefer_lossless": _env("PREFER_LOSSLESS", "1") == "1",

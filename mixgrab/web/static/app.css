@@ -197,3 +197,5 @@ a.fmt:hover { color: var(--ink); border-color: var(--ink2); }
 .tr .name b .fmt.yt { color: var(--bad); }
 .btn { white-space: nowrap; }
 .tr .name b .t { display: block; color: var(--ink); font-size: 14px; }
+button.ytc { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; text-align: left; }
+button.ytc:hover span:last-child { color: var(--ink); text-decoration: underline; }
