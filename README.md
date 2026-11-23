@@ -83,6 +83,25 @@ Each mix goes into its own folder: `<download_dir>/<mix title>/`. The folder con
 
 If you run the same URL again, mixgrab skips the tracks it already has.
 
+### Copy the library (or any folder) to a USB drive
+```
+mixgrab --sync D                              # copy the library to D:\mixgrab
+mixgrab --sync D --mp3-only                   # MP3 copies instead of FLAC/WAV (car stereos, smaller sticks)
+mixgrab --sync D --dry-run                    # just show what would be copied
+mixgrab --sync D --mirror                     # also delete files the library no longer has (asks first)
+mixgrab --sync E:\Music\Mixes                 # the library into any folder
+mixgrab --sync "C:\Users\me\Music\DJ" D       # any folder: copies it to D:\DJ
+mixgrab --sync C:\Some\Folder E:\Backup\Copy  # any folder into any folder
+```
+- With one path, the source is the mixgrab library. With two, the first is the source and the second the destination.
+- A bare drive letter as the destination means a folder named like the source on that drive.
+- `--mirror` refuses to work on a whole drive (`D:\`); give it a folder.
+- Only new or changed files are copied, so a second sync is quick.
+- Each file is written under a temporary name and renamed when complete, so pulling the stick mid-copy never leaves a cut-off song.
+- With `--mp3-only`, a lossless file is skipped when its MP3 copy exists, and `playlist.m3u` points at the MP3s. Lossless files with no MP3 copy are still copied.
+- The scratch `.identify` folders and unfinished downloads are left out.
+- mixgrab checks there is enough free space before starting. Eject the drive before unplugging it.
+
 ### If YouTube asks you to sign in
 Sometimes YouTube refuses with "Sign in to confirm you're not a bot". This mostly happens on VPNs and servers. Give mixgrab your YouTube cookies once:
 ```

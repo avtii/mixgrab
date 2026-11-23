@@ -275,6 +275,84 @@ async def run(args) -> int:
     return 0 if not missing else 2
 
 
+def sync(args) -> int:
+    """mixgrab --sync [SOURCE] DEST: copy a folder (the library by default) to a USB drive or any
+    other folder, only what is new or changed."""
+    from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
+    from . import sync as sy
+    from .ui import console, esc
+    if len(args.sync) > 2:
+        console.print("[red]--sync takes a destination, or a source and a destination.[/]")
+        return 1
+    if len(args.sync) == 2:
+        library = sy.resolve_source(args.sync[0])
+    else:
+        library = os.path.expandvars(os.path.expanduser(args.out or load_config()["download_dir"]))
+    if not os.path.isdir(library):
+        console.print(f"[red]Source folder not found:[/] {esc(library)}")
+        return 1
+    dest = sy.resolve_dest(args.sync[-1], library)
+    drive = os.path.splitdrive(dest)[0]
+    if drive and not os.path.exists(drive + os.sep):
+        console.print(f"[red]Drive {esc(drive)} isn't there.[/] Plug in the USB stick, or check the letter.")
+        return 1
+    lib, dst = os.path.normcase(os.path.abspath(library)), os.path.normcase(os.path.abspath(dest))
+    if os.path.splitdrive(lib)[0] == os.path.splitdrive(dst)[0] and os.path.commonpath([lib, dst]) in (lib, dst):
+        console.print("[red]The source and the destination overlap.[/] Pick another folder or drive.")
+        return 1
+    if args.mirror and os.path.dirname(dst) == dst:
+        console.print("[red]--mirror won't run on a whole drive.[/] Give a folder, e.g. D:\\Music.")
+        return 1
+    with console.status("Comparing the source with the destination…"):
+        p = sy.plan(library, dest, mp3_only=args.mp3_only, mirror=args.mirror)
+    console.print(f"[bold]{esc(library)}[/] → [bold]{esc(dest)}[/]")
+    console.print(f"{len(p.copy)} to copy ({p.bytes / 1e6:,.0f} MB), {p.same} already there"
+                  + (f", {len(p.remove)} in the destination but not in the source" if args.mirror else "")
+                  + (", MP3 copies instead of lossless files" if args.mp3_only else ""))
+    probe = dest
+    while not os.path.exists(probe) and os.path.dirname(probe) != probe:
+        probe = os.path.dirname(probe)
+    free = shutil.disk_usage(probe).free
+    if p.bytes > free:
+        console.print(f"[red]Not enough space:[/] needs {p.bytes / 1e6:,.0f} MB, the drive has {free / 1e6:,.0f} MB free."
+                      + ("" if args.mp3_only else " Try --mp3-only."))
+        return 1
+    if args.dry_run:
+        for src, _, size in p.copy[:40]:
+            console.print(f"  [green]+[/] {esc(os.path.relpath(src, library))} [dim]{size / 1e6:.1f} MB[/]")
+        for f in p.remove[:40]:
+            console.print(f"  [red]-[/] {esc(os.path.relpath(f, dest))}")
+        if len(p.copy) > 40 or len(p.remove) > 40:
+            console.print("  [dim]…[/]")
+        return 0
+    if p.remove:
+        if not sys.stdin.isatty():
+            console.print("[red]--mirror would delete files; run it in a terminal to confirm.[/]")
+            return 1
+        try:
+            ans = console.input(f"[yellow]Delete {len(p.remove)} files from {esc(dest)} that aren't in the source?[/] [y/N] ")
+        except EOFError:
+            ans = ""
+        if ans.strip().lower() not in ("y", "yes"):
+            console.print("[dim]Nothing deleted.[/]")
+            p.remove = []
+    if not (p.copy or p.remove or p.playlists):
+        console.print("[green]Already in sync.[/]")
+        return 0
+    with Progress(TextColumn("{task.description}"), BarColumn(bar_width=30), DownloadColumn(),
+                  TransferSpeedColumn(), TextColumn("[dim]{task.fields[name]}"), console=console) as bar:
+        task = bar.add_task("Copying", total=p.bytes or 1, name="")
+        errors = sy.run(p, dest, lambda done, name: bar.update(task, completed=done, name=name[:50]))
+    for f, e in errors[:20]:
+        console.print(f"  [red]✗[/] {esc(os.path.relpath(f, library) if f.startswith(library) else f)} [dim]— {esc(e)}[/]")
+    ok = len(p.copy) + len(p.remove) - len(errors)
+    console.print(f"[bold {'yellow' if errors else 'green'}]Synced[/] {ok} files"
+                  + (f", {len(errors)} failed" if errors else "")
+                  + (". [dim]Eject the drive before unplugging it.[/]"
+                     if os.path.splitdrive(lib)[0] != os.path.splitdrive(dst)[0] else "."))
+    return 2 if errors else 0
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(prog="mixgrab", description=__doc__)
@@ -295,6 +373,11 @@ def main() -> None:
     p.add_argument("--no-youtube", action="store_true", help="don't fall back to YouTube for tracks Soulseek lacks")
     p.add_argument("--no-soundcloud", action="store_true", help="don't fall back to SoundCloud for tracks Soulseek lacks")
     p.add_argument("--no-mp3", action="store_true", help="don't make MP3 copies of lossless downloads")
+    p.add_argument("--sync", nargs="+", metavar="PATH",
+                   help="--sync DEST copies the library, --sync SOURCE DEST copies any folder; only new or changed "
+                        "files, then exit. A bare drive letter as DEST (D or D:) means D:/<source folder name>")
+    p.add_argument("--mp3-only", action="store_true", help="with --sync: send the MP3 copy instead of FLAC/WAV when there is one")
+    p.add_argument("--mirror", action="store_true", help="with --sync: also delete files in DEST that the source no longer has (asks first)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--export-cookies", nargs="?", const="auto", metavar="BROWSER",
                    help="find your YouTube cookies in a browser (all of them, or the one named), save them to "
@@ -304,6 +387,8 @@ def main() -> None:
         sys.exit(check())
     if args.export_cookies:
         sys.exit(export_cookies(None if args.export_cookies == "auto" else args.export_cookies))
+    if args.sync:
+        sys.exit(sync(args))
     if not args.url:
         p.print_help()
         sys.exit(1)
