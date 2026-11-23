@@ -252,11 +252,15 @@ class Downloader:
                         attempt: int = 1) -> tuple[bool, str]:
         tr = Transfer(c.username, c.path, TransferDirection.DOWNLOAD)
         tr.local_path = part
-        tr = await self.client.transfers.add(tr)
-        await self.client.transfers.queue(tr)
         started = last_change = time.monotonic()
-        last_bytes = -1
+        last_seen = None
+        waiting = (TransferState.QUEUED, TransferState.VIRGIN, TransferState.INITIALIZING)
         try:
+            try:
+                tr = await asyncio.wait_for(self.client.transfers.add(tr), 30)
+                await asyncio.wait_for(self.client.transfers.queue(tr), 30)
+            except asyncio.TimeoutError:
+                return False, "the Soulseek client did not answer"
             while True:
                 await asyncio.sleep(1)
                 st = tr.state.VALUE
@@ -271,13 +275,15 @@ class Downloader:
                 else:
                     self._status(idx, "queued", place=tr.place_in_queue, attempt=attempt,
                                    user=c.username, waited=int(now - started))
-                if tr.bytes_transfered != last_bytes:
-                    last_bytes, last_change = tr.bytes_transfered, now
-                if st in (TransferState.QUEUED, TransferState.VIRGIN, TransferState.INITIALIZING) \
-                        and tr.bytes_transfered == 0 and now - started > m["queue_timeout"]:
-                    return False, f"stuck in remote queue for {m['queue_timeout']}s" + (
-                        f" (place {tr.place_in_queue})" if tr.place_in_queue else "")
-                if now - last_change > m["stall_timeout"] and tr.bytes_transfered > 0:
+                if (st, tr.bytes_transfered) != last_seen:      # any progress or state change
+                    last_seen, last_change = (st, tr.bytes_transfered), now
+                if st in waiting and tr.bytes_transfered == 0:
+                    if now - started > m["queue_timeout"]:
+                        return False, f"stuck in remote queue for {m['queue_timeout']}s" + (
+                            f" (place {tr.place_in_queue})" if tr.place_in_queue else "")
+                elif now - last_change > m["stall_timeout"]:
+                    # also covers a transfer that says 'downloading' but never sends a byte,
+                    # and states the loop doesn't otherwise expect (paused, unset)
                     return False, f"stalled for {m['stall_timeout']}s"
         finally:
             if tr.state.VALUE != TransferState.COMPLETE:

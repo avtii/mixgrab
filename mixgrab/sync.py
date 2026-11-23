@@ -32,6 +32,15 @@ def resolve_dest(dest: str, source: str) -> str:
     return os.path.abspath(os.path.expandvars(os.path.expanduser(d)))
 
 
+def overlaps(a: str, b: str) -> bool:
+    """True when one folder is inside the other (or they are the same), links and junctions followed:
+    syncing then would copy the destination into itself, or a mirror would delete the source."""
+    ra, rb = (os.path.normcase(os.path.realpath(x)) for x in (a, b))
+    if os.path.splitdrive(ra)[0] != os.path.splitdrive(rb)[0]:
+        return False
+    return os.path.commonpath([ra, rb]) in (ra, rb)
+
+
 @dataclass
 class Plan:
     copy: list[tuple[str, str, int]] = field(default_factory=list)   # (src, dst, size)
@@ -70,6 +79,10 @@ def _unchanged(src: str, dst: str) -> bool:
 
 
 def plan(library: str, dest: str, mp3_only: bool = False, mirror: bool = False) -> Plan:
+    if overlaps(library, dest):
+        raise ValueError("the source and the destination overlap")
+    if mirror and os.path.islink(dest):
+        raise ValueError("won't mirror into a destination that is a link")
     p = Plan()
     want = _wanted(library, mp3_only)
     for rel, src in want.items():

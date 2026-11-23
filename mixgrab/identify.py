@@ -89,14 +89,18 @@ def fix_wav_header(b: bytes) -> bytes:
         return b
     out = bytearray(b)
     out[4:8] = (len(b) - 8).to_bytes(4, "little")
-    pos = 12
+    pos, data = 12, -1
     while pos + 8 <= len(out):
         cid = bytes(out[pos:pos + 4])
         size = int.from_bytes(out[pos + 4:pos + 8], "little")
         if cid == b"data":
-            out[pos + 4:pos + 8] = (len(out) - pos - 8).to_bytes(4, "little")
+            data = pos
             break
         pos += 8 + size + (size & 1)
+    if data < 0:                      # a chunk size before it was bogus too: look for the tag instead
+        data = out.find(b"data", 12)
+    if 0 <= data <= len(out) - 8:
+        out[data + 4:data + 8] = (len(out) - data - 8).to_bytes(4, "little")
     return bytes(out)
 
 
@@ -245,9 +249,22 @@ def _load_cache(path: str | None) -> dict[int, tuple[str, str] | None]:
         return {}
     try:
         with open(path, encoding="utf-8") as f:
-            return {int(k): (tuple(v) if v else None) for k, v in json.load(f).items()}
-    except (OSError, ValueError, TypeError):
+            raw = json.load(f)
+    except (OSError, ValueError):
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k, v in raw.items():          # keep only well-formed entries; anything else gets asked again
+        try:
+            at = int(k)
+        except ValueError:
+            continue
+        if v is None:
+            out[at] = None
+        elif isinstance(v, list) and len(v) == 2 and all(isinstance(x, str) for x in v):
+            out[at] = (v[0], v[1])
+    return out
 
 
 def _save_cache(path: str | None, cache: dict):

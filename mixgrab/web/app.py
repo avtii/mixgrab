@@ -94,8 +94,9 @@ async def security_headers(request: Request, call_next):
 
 
 # ---------------- auth ----------------
+# Failed sign-ins per client IP. No site-wide cap: anyone could use one to lock the owner out, and the
+# 24-character random password is what actually stops guessing.
 FAILS: dict[str, deque] = defaultdict(deque)
-GLOBAL_FAILS: deque = deque()
 
 
 def client_ip(request: Request) -> str:
@@ -113,15 +114,15 @@ async def login(body: Login, request: Request, response: Response):
     q = FAILS[ip]
     while q and now - q[0] > 900:
         q.popleft()
-    while GLOBAL_FAILS and now - GLOBAL_FAILS[0] > 900:
-        GLOBAL_FAILS.popleft()
-    if len(q) >= 5 or len(GLOBAL_FAILS) >= 30:
+    if not q:
+        FAILS.pop(ip, None)                 # don't keep an entry for every IP that ever tried
+    if len(q) >= 5:
         raise HTTPException(429, "Too many attempts. Try again in 15 minutes.")
-    ok = hmac.compare_digest(body.username.strip().lower(), S.OWNER_USER.lower()) & \
+    # compare bytes: compare_digest raises TypeError on non-ASCII str
+    ok = hmac.compare_digest(body.username.strip().lower().encode(), S.OWNER_USER.lower().encode()) & \
         hmac.compare_digest(body.password.encode(), S.OWNER_PASSWORD.encode())
     if not ok:
-        q.append(now)
-        GLOBAL_FAILS.append(now)
+        FAILS[ip].append(now)
         await _sleep(1.0)
         raise HTTPException(401, "Wrong username or password.")
     response.set_cookie(COOKIE, make_session(), max_age=S.SESSION_DAYS * 86400, httponly=True,
@@ -193,8 +194,9 @@ async def upload_cookies(request: Request):
         text = "# Netscape HTTP Cookie File\n" + text
     S.COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = S.COOKIES_FILE.with_suffix(".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    with os.fdopen(os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600), "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(tmp, 0o600)                          # in case a stale .tmp was already there
     os.replace(tmp, S.COOKIES_FILE)
     mgr.apply_cookies()
     return {"ok": True, "cookies": len(yt)}
