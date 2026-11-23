@@ -51,7 +51,7 @@ You still need ffmpeg and Deno (or Node.js) on your PATH.
 ### Check the setup
 ```
 > mixgrab --check
-mixgrab 0.3.0 on Windows AMD64
+mixgrab 0.3.1 on Windows AMD64
 config:   C:\Users\you\.mixgrab\config.toml (exists)
 ffmpeg:   C:\...\ffmpeg.exe
 JS:       C:\...\deno.exe
