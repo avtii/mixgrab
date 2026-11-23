@@ -1,0 +1,16 @@
+[project]
+name = "mixgrab"
+version = "0.1.0"
+description = "YouTube DJ mix/playlist -> tracklist (chapters, description, comments or Shazam) -> Soulseek downloads"
+requires-python = ">=3.11"
+dependencies = ["yt-dlp", "aioslsk>=1.7", "shazamio", "rich"]
+
+[project.scripts]
+mixgrab = "mixgrab.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mixgrab"]
