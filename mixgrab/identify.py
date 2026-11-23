@@ -41,6 +41,8 @@ def download_audio(url: str, work_dir: str, progress=lambda done, total: None) -
             "outtmpl": os.path.join(work_dir, "mixaudio.%(ext)s"), "noplaylist": True,
             "progress_hooks": [lambda d: progress(d.get("downloaded_bytes") or 0,
                                                   d.get("total_bytes") or d.get("total_bytes_estimate") or 0)]}
+    from .tracklist import YDL_EXTRA
+    opts.update(YDL_EXTRA)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info)
@@ -48,9 +50,78 @@ def download_audio(url: str, work_dir: str, progress=lambda done, total: None) -
 
 def clip(ffmpeg: str, src: str, at: int) -> bytes:
     r = subprocess.run([ffmpeg, "-v", "error", "-ss", str(at), "-t", str(CLIP), "-i", src,
-                        "-ac", "1", "-ar", "16000", "-f", "wav", "-"],
+                        "-ac", "1", "-ar", "16000", "-map_metadata", "-1", "-bitexact", "-f", "wav", "-"],
                        capture_output=True, check=True)
-    return r.stdout
+    return fix_wav_header(r.stdout)
+
+
+def fix_wav_header(b: bytes) -> bytes:
+    """ffmpeg can't seek back on a pipe, so a piped WAV has bogus RIFF/data sizes; Shazam's decoder
+    then fails with 'unexpected end of file'. Patch the sizes in place."""
+    if len(b) < 44 or b[:4] != b"RIFF":
+        return b
+    out = bytearray(b)
+    out[4:8] = (len(b) - 8).to_bytes(4, "little")
+    pos = 12
+    while pos + 8 <= len(out):
+        cid = bytes(out[pos:pos + 4])
+        size = int.from_bytes(out[pos + 4:pos + 8], "little")
+        if cid == b"data":
+            out[pos + 4:pos + 8] = (len(out) - pos - 8).to_bytes(4, "little")
+            break
+        pos += 8 + size + (size & 1)
+    return bytes(out)
+
+
+# ---------------- optional fallback recognizers (used on clips Shazam can't place) ----------------
+# SoundHound has no public recognition API (Houndify is enterprise-gated), so the keyed options are
+# AudD (api_token, small free quota) and ACRCloud (host + access key/secret; best coverage for DJ sets).
+async def _audd(session, token: str, data: bytes):
+    import aiohttp
+    form = aiohttp.FormData()
+    form.add_field("api_token", token)
+    form.add_field("file", data, filename="clip.wav", content_type="audio/wav")
+    async with session.post("https://api.audd.io/", data=form, timeout=aiohttp.ClientTimeout(total=30)) as r:
+        js = await r.json(content_type=None)
+    if js.get("status") == "error":
+        raise RuntimeError(f"AudD: {js.get('error', {}).get('error_message')}")
+    res = js.get("result")
+    return (res["artist"], res["title"]) if res and res.get("artist") and res.get("title") else None
+
+
+async def _acrcloud(session, conf: dict, data: bytes):
+    import aiohttp, base64, hashlib, hmac, time as _t
+    ts = str(int(_t.time()))
+    to_sign = "\n".join(["POST", "/v1/identify", conf["access_key"], "audio", "1", ts])
+    sig = base64.b64encode(hmac.new(conf["access_secret"].encode(), to_sign.encode(), hashlib.sha1).digest()).decode()
+    form = aiohttp.FormData()
+    for k, v in {"access_key": conf["access_key"], "sample_bytes": str(len(data)), "timestamp": ts,
+                 "signature": sig, "data_type": "audio", "signature_version": "1"}.items():
+        form.add_field(k, v)
+    form.add_field("sample", data, filename="clip.wav", content_type="audio/wav")
+    url = f"https://{conf['host']}/v1/identify"
+    async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30)) as r:
+        js = await r.json(content_type=None)
+    code = js.get("status", {}).get("code")
+    if code not in (0, 1001):                       # 1001 = no result
+        raise RuntimeError(f"ACRCloud: {js.get('status', {}).get('msg')}")
+    music = (js.get("metadata") or {}).get("music") or []
+    if not music:
+        return None
+    m = music[0]
+    artist = ", ".join(a.get("name", "") for a in m.get("artists", [])) or ""
+    return (artist, m.get("title", "")) if artist and m.get("title") else None
+
+
+def recognizers(conf: dict) -> list[tuple[str, object]]:
+    """Fallback recognizers enabled by config: {'audd_token': ..., 'acrcloud': {host, access_key, access_secret}}."""
+    out = []
+    acr = conf.get("acrcloud") or {}
+    if acr.get("host") and acr.get("access_key") and acr.get("access_secret"):
+        out.append(("ACRCloud", lambda s, d: _acrcloud(s, acr, d)))
+    if conf.get("audd_token"):
+        out.append(("AudD", lambda s, d: _audd(s, conf["audd_token"], d)))
+    return out
 
 
 @dataclass
@@ -65,37 +136,58 @@ class Hit:
 
 
 async def scan(audio: str, duration: int, step: int, parallel: int = 3,
-               progress=lambda done, total, matches: None) -> list[Hit]:
+               progress=lambda done, total, matches: None, fallbacks: list | None = None) -> list[Hit]:
+    """Fingerprint a clip every `step` seconds with Shazam; clips it misses go to the keyed fallbacks."""
+    import aiohttp
     ffmpeg = find_ffmpeg()
     points = list(range(5, max(duration - CLIP, 6), step))
     log.debug("Identifying: %d clips of %ds, every %ds", len(points), CLIP, step)
     sem = asyncio.Semaphore(parallel)
     shazam = Shazam()
     hits: list[Hit] = []
+    fallbacks = list(fallbacks or [])
+    dead: set[str] = set()                      # fallbacks that errored hard (bad key, quota) are skipped
     done = 0
 
-    async def one(at: int):
+    async def shazam_one(data: bytes):
+        for attempt in range(3):
+            try:
+                res = await shazam.recognize(data)
+                break
+            except Exception:  # rate limits / transient HTTP errors
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(5 * (attempt + 1))
+        tr = res.get("track")
+        return (tr.get("subtitle", "").strip(), tr.get("title", "").strip()) if tr else None
+
+    async def one(session, at: int):
         nonlocal done
         async with sem:
             try:
                 data = await asyncio.to_thread(clip, ffmpeg, audio, at)
-                for attempt in range(3):
+                found = None
+                try:
+                    found = await shazam_one(data)
+                except Exception as e:
+                    log.debug("shazam at %ds failed: %s", at, e)
+                for name, fn in fallbacks:
+                    if found or name in dead:
+                        continue
                     try:
-                        res = await shazam.recognize(data)
-                        break
-                    except Exception as e:  # rate limits / transient HTTP errors
-                        if attempt == 2:
-                            raise
-                        await asyncio.sleep(5 * (attempt + 1))
-                tr = res.get("track")
-                if tr:
-                    hits.append(Hit(at, tr.get("subtitle", "").strip(), tr.get("title", "").strip()))
+                        found = await fn(session, data)
+                    except Exception as e:
+                        log.warning("%s disabled for this scan: %s", name, e)
+                        dead.add(name)
+                if found and found[0] and found[1]:
+                    hits.append(Hit(at, found[0], found[1]))
             except Exception as e:
                 log.debug("clip at %ds failed: %s", at, e)
             done += 1
             progress(done, len(points), len(hits))
 
-    await asyncio.gather(*(one(p) for p in points))
+    async with aiohttp.ClientSession() as session:
+        await asyncio.gather(*(one(session, p) for p in points))
     hits.sort(key=lambda h: h.at)
     return hits
 

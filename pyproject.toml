@@ -1,16 +1,23 @@
 [project]
 name = "mixgrab"
-version = "0.1.0"
-description = "YouTube DJ mix/playlist -> tracklist (chapters, description, comments or Shazam) -> Soulseek downloads"
+version = "0.2.0"
+description = "YouTube DJ mix/album/playlist -> tracklist (YouTube, MixesDB, MusicBrainz or audio ID) -> Soulseek downloads, YouTube fallback, MP3 copies"
 requires-python = ">=3.11"
-dependencies = ["yt-dlp", "aioslsk>=1.7", "shazamio", "rich"]
+dependencies = ["yt-dlp", "aioslsk>=1.7", "shazamio", "rich", "aiohttp"]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 
 [project.scripts]
 mixgrab = "mixgrab.cli:main"
+mixgrab-web = "mixgrab.web.app:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["mixgrab"]
+packages = ["mixgrab", "mixgrab.web"]
+
+[tool.setuptools.package-data]
+"mixgrab.web" = ["static/*"]

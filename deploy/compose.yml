@@ -1,0 +1,22 @@
+# mixgrab on the Tonk VM. Lives in /opt/mixgrab; the deploy workflow writes this file and .env there.
+# Caddy (burrball stack) proxies mixgrab.roketz.app -> mixgrab:8080 over the burrball_default network.
+services:
+  mixgrab:
+    image: ghcr.io/avtii/mixgrab:latest
+    container_name: mixgrab
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MIXGRAB_DATA: /data
+      YTDLP_COOKIES: ${YTDLP_COOKIES:-}
+    volumes:
+      - ./data:/data
+    ports:
+      - "61234:61234"        # Soulseek peers connect here (plain)
+      - "61235:61235"        # Soulseek obfuscated port
+    networks: [burrball_default]
+    mem_limit: 1500m
+
+networks:
+  burrball_default:
+    external: true

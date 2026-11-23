@@ -67,6 +67,8 @@ STATE_STYLE = {
     "queued": "[magenta]in peer queue[/]",
     "downloading": "[cyan]downloading[/]",
     "retry": "[yellow]retrying[/]",
+    "youtube": "[blue]trying YouTube[/]",
+    "converting": "[cyan]→ mp3[/]",
     "done": "[green]✓ done[/]",
     "skip": "[green]✓ have it[/]",
     "missing": "[red]✗ not found[/]",
@@ -132,6 +134,11 @@ class DownloadProgress:
             task = self.p.tasks[[t.id for t in self.p.tasks].index(tid)]
             upd["total"] = task.total or 1
             upd["completed"] = upd["total"]
+        elif state == "youtube":
+            upd["note"] = "not on Soulseek"
+            upd["completed"] = 0
+        elif state == "converting":
+            upd["note"] = "flac → mp3"
         elif state == "missing":
             upd["note"] = i.get("note", "")[:40]
         self.p.update(tid, **upd)
@@ -140,11 +147,12 @@ class DownloadProgress:
 
 
 def summary(tracks, results, out_dir) -> None:
-    ok = [t for t in tracks if results[t.index][0]]
+    ok = [t for t in tracks if results[t.index].path]
     console.print()
     style = "green" if len(ok) == len(tracks) else "yellow"
     console.print(f"[bold {style}]Downloaded {len(ok)}/{len(tracks)}[/] → [link=file:///{out_dir}]{out_dir}[/]")
     for t in tracks:
-        path, msg = results[t.index]
+        r = results[t.index]
+        path, msg = r.path, r.msg
         if not path:
             console.print(f"  [red]✗[/] {t.index:02d}. {t.label} [dim]— {msg}[/]")

@@ -9,6 +9,7 @@ Sources, in order of trust:
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -124,16 +125,34 @@ def _good(tracks: list[Track]) -> bool:
     return len(tracks) >= 2 and all(t.start is not None for t in tracks)
 
 
+# Extra yt-dlp options applied everywhere (e.g. {"cookiefile": "..."} on servers YouTube distrusts)
+YDL_EXTRA: dict = {}
+if not shutil.which("deno") and shutil.which("node"):
+    YDL_EXTRA["js_runtimes"] = {"node": {}}   # YouTube needs a JS runtime; yt-dlp only enables deno by default
+
+
 def _ydl(extra: dict) -> yt_dlp.YoutubeDL:
     opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noprogress": True}
+    opts.update(YDL_EXTRA)
     opts.update(extra)
     return yt_dlp.YoutubeDL(opts)
 
 
-def fetch_tracklist(url: str, log=print) -> Tracklist:
+def fetch_tracklist(url: str, log=print, online: bool = True) -> Tracklist:
     with _ydl({"extract_flat": "in_playlist"}) as ydl:
         info = ydl.extract_info(url, download=False)
+    tl = _from_youtube(url, info, log)
+    if online and info.get("_type") != "playlist" and tl.looks_incomplete():
+        from .lookup import lookup
+        found = lookup(info, log)
+        if found and (len(found.tracks) > len(tl.tracks)
+                      or (getattr(found, "verified", False) and len(found.tracks) >= 0.6 * len(tl.tracks))
+                      or (len(found.tracks) == len(tl.tracks) and found.unknown < tl.unknown)):
+            return found
+    return tl
 
+
+def _from_youtube(url: str, info: dict, log) -> Tracklist:
     title = info.get("title") or url
 
     # 1. Playlist: each entry title is a track
@@ -170,6 +189,29 @@ def fetch_tracklist(url: str, log=print) -> Tracklist:
         _fill_lengths(tracks, total)
         return Tracklist(title, "description", tracks, total, count_unknown(info.get("description") or ""))
 
+    # 3b. Single-artist album: chapters / timestamped lines carry titles only ("2. In Suspense 4:25");
+    #     the artist comes from the video title ("Artist - Album [Full Album]") or the channel.
+    artist = album_artist(info)
+    if artist:
+        tracks = []
+        for ch in chapters:
+            name = title_only(ch.get("title") or "")
+            if name:
+                st, en = int(ch.get("start_time") or 0), ch.get("end_time")
+                tracks.append(Track(len(tracks) + 1, artist, name, st, int(en - st) if en else None))
+        if _good(tracks):
+            return Tracklist(title, f"chapters (album by {artist})", tracks, total)
+        tracks = []
+        for line in (info.get("description") or "").splitlines():
+            if TS_RE.search(line) and "http" not in line.lower():
+                name = title_only(line)
+                if name:
+                    m = TS_RE.search(line)
+                    tracks.append(Track(len(tracks) + 1, artist, name, _ts_to_sec(*m.groups())))
+        if _good(tracks) and all(t.start is not None for t in tracks):
+            _fill_lengths(tracks, total)
+            return Tracklist(title, f"description (album by {artist})", tracks, total)
+
     # 4. Comments
     log("No tracklist in chapters/description, reading comments...")
     with _ydl({"getcomments": True,
@@ -190,6 +232,36 @@ def fetch_tracklist(url: str, log=print) -> Tracklist:
         return Tracklist(title, f"comment by {c.get('author')}", tr, total, count_unknown(c.get("text") or ""))
 
     return Tracklist(title, "nothing found", [], total)
+
+
+VA_RE = re.compile(r"^(va|v\.a\.|various( artists)?|mix|dj mix|playlist)$", re.I)
+
+
+def album_artist(info: dict) -> Optional[str]:
+    """Artist of a single-artist album upload, from 'Artist - Album [Full Album]' or the channel."""
+    if re.search(r"compiled by|various artists|\bv\.?a\.?(?=\s|$)|mixed by|\bmix\b|\bdj set\b", info.get("title") or "", re.I):
+        return None
+    t = VIDEO_JUNK_RE.sub("", info.get("title") or "")
+    t = re.sub(r"^\s*[^\w(]*\s*(?:\w+\s*)?(?:psychill|psybient|chillout|ambient)\s*[-|:]\s*", "", t, flags=re.I) \
+        if t.count(" - ") >= 2 else t     # "Genre - Artist - Album" channel style
+    parts = [p.strip() for p in SEP_RE.split(t, maxsplit=1)]
+    if len(parts) == 2 and parts[0] and not VA_RE.match(parts[0]) and len(parts[0]) <= 60:
+        return parts[0]
+    ch = info.get("artist") or info.get("creator") or ""
+    if not ch and (info.get("channel") or "").endswith(" - Topic"):
+        ch = info["channel"][:-8]
+    return ch.strip() or None
+
+
+def title_only(line: str) -> Optional[str]:
+    line = TS_RE.sub(" ", line)
+    line = LEAD_JUNK_RE.sub("", line.strip())
+    line = NUM_RE.sub("", line)
+    line = LEAD_JUNK_RE.sub("", line)
+    line = TRAIL_JUNK_RE.sub("", line).strip()
+    if not line or len(line) > 120 or line.lower() in UNKNOWN:
+        return None
+    return line
 
 
 def load_tracklist_file(path: str, title: str) -> Tracklist:

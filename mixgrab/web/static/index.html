@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>mixgrab</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- Login -->
+<section id="login" class="login hidden">
+  <form id="login-form" class="login-card" autocomplete="on">
+    <div class="brand"><span class="logo"></span>mixgrab</div>
+    <p class="muted">Private. Sign in to continue.</p>
+    <label>Username<input name="username" autocomplete="username" required></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <button class="btn primary wide" type="submit">Sign in</button>
+    <p id="login-err" class="err"></p>
+  </form>
+</section>
+
+<!-- App -->
+<div id="app" class="shell hidden">
+  <aside class="side">
+    <div class="brand"><span class="logo"></span>mixgrab</div>
+    <button id="new-btn" class="btn ghost wide left"><span class="i i-plus"></span>New search</button>
+    <div class="side-label">History</div>
+    <nav id="history" class="history"></nav>
+    <div class="side-foot">
+      <div id="slsk" class="status-line"><span class="dot"></span><span>Soulseek</span></div>
+      <div id="cache" class="cache"><div class="cache-bar"><i></i></div><span></span></div>
+      <button id="logout" class="btn link">Sign out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <button id="menu" class="menu-btn" aria-label="Menu"><span class="i i-menu"></span></button>
+
+    <!-- New search -->
+    <section id="home" class="home">
+      <h1>Find every track in a mix</h1>
+      <p class="muted lead">Paste a YouTube DJ set, mix, album or playlist. mixgrab reads the chapters, description and comments, listens to the audio when there is no tracklist, and fetches each track.</p>
+      <form id="new-form" class="composer">
+        <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off" required>
+        <div class="composer-row">
+          <div class="seg" role="radiogroup" aria-label="Identify from audio">
+            <span class="seg-label">Identify from audio</span>
+            <label><input type="radio" name="identify" value="auto" checked><span>Auto</span></label>
+            <label><input type="radio" name="identify" value="always"><span>Always</span></label>
+            <label><input type="radio" name="identify" value="never"><span>Never</span></label>
+          </div>
+          <button class="btn primary" type="submit"><span class="i i-search"></span>Find tracks</button>
+        </div>
+        <p id="new-err" class="err"></p>
+      </form>
+    </section>
+
+    <!-- Job -->
+    <section id="job" class="job hidden">
+      <header class="job-head">
+        <img id="job-thumb" class="thumb" alt="">
+        <div class="job-meta">
+          <div id="job-status" class="pill"></div>
+          <h2 id="job-title"></h2>
+          <div class="muted small"><a id="job-url" target="_blank" rel="noopener noreferrer"></a> · <span id="job-source"></span></div>
+        </div>
+        <div class="job-actions">
+          <a id="zip-btn" class="btn primary hidden"><span class="i i-down"></span>Download all</a>
+          <button id="copy-btn" class="btn ghost" title="Copy tracklist"><span class="i i-copy"></span></button>
+          <button id="resume-btn" class="btn ghost hidden">Resume</button>
+          <button id="del-btn" class="btn ghost danger" title="Delete"><span class="i i-trash"></span></button>
+        </div>
+      </header>
+
+      <div id="phase" class="phase hidden">
+        <div class="phase-row"><span id="phase-label"></span><span id="phase-info" class="muted"></span></div>
+        <div class="bar"><i id="phase-bar"></i></div>
+      </div>
+
+      <div class="summary" id="summary"></div>
+      <ol id="tracks" class="tracks"></ol>
+
+      <details class="maybe hidden" id="maybe">
+        <summary>Heard once (not fetched)</summary>
+        <ul id="maybe-list"></ul>
+      </details>
+
+      <form id="add-form" class="add-row">
+        <input name="artist" placeholder="Artist" required>
+        <input name="title" placeholder="Title" required>
+        <button class="btn ghost" type="submit"><span class="i i-plus"></span>Add track</button>
+      </form>
+    </section>
+  </main>
+</div>
+
+<!-- Player -->
+<div id="player" class="player hidden">
+  <div class="player-info"><b id="pl-title"></b><span id="pl-artist" class="muted"></span></div>
+  <audio id="audio" controls preload="none"></audio>
+  <button id="pl-close" class="btn link" aria-label="Close player">✕</button>
+</div>
+
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

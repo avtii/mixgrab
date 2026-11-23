@@ -45,6 +45,18 @@ auto = true                 # identify from audio when the tracklist is missing 
 step = 45                   # seconds between sampled clips
 min_hits = 2                # a song must match in this many clips to count
 max_avg_track_len = 600     # tracklist with fewer tracks than duration/this = incomplete
+# [convert]
+# mp3 = true                # MP3 copy next to every FLAC/WAV/AIFF download (original is kept)
+# bitrate = 320
+# [youtube]
+# fallback = true           # tracks not on Soulseek are taken from YouTube, saved as '... [YT].mp3'
+# quality = "0"             # LAME VBR 0 (best) .. 9, or a bitrate such as "320"
+# Optional fallback recognizers for clips Shazam misses (SoundHound has no public API):
+# audd_token = ""           # https://audd.io (free quota)
+# [identify.acrcloud]       # https://www.acrcloud.com (best for DJ sets; free trial)
+# host = "identify-eu-west-1.acrcloud.com"
+# access_key = ""
+# access_secret = ""
 """
 
 log = logging.getLogger("mixgrab")
@@ -70,39 +82,18 @@ def mix_folder(cfg: dict, title: str) -> str:
     return d
 
 
-async def identify_into(tl: Tracklist, url: str, cfg: dict, out_dir: str) -> None:
-    from .identify import download_audio, hits_to_tracks, merge, scan
-    from .ui import IdentifyProgress, console, fmt_ts
-    ic = cfg["identify"]
-    work = os.path.join(out_dir, ".identify")
-    with IdentifyProgress() as ip:
-        audio = await asyncio.to_thread(download_audio, url, work, ip.on_audio)
-        duration = tl.duration
-        if not duration:
-            import yt_dlp
-            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as y:
-                duration = int(y.extract_info(url, download=False).get("duration") or 0)
-        hits = await scan(audio, duration, ic["step"], progress=ip.on_clips)
-    with open(os.path.join(work, "hits.json"), "w", encoding="utf-8") as f:
-        json.dump([h.__dict__ for h in hits], f, indent=1, ensure_ascii=False)
-    found, maybe = hits_to_tracks(hits, ic["min_hits"], duration)
-    before = len(tl.tracks)
-    tl.tracks = merge(tl.tracks, found)
-    tl.found_in += f" + audio ID ({len(tl.tracks) - before} added)"
-    if maybe:
-        console.print("[dim]Low-confidence (heard once, skipped):[/]")
-        for h in maybe:
-            console.print(f"[dim]  ~{fmt_ts(h.at)}  {h.artist} – {h.title}[/]")
-    console.print()
-
-
 async def run(args) -> int:
-    from .ui import DownloadProgress, console, header, summary, tracklist_table
-    cfg = load_config()
+    from .engine import Engine, identify_into, identify_reason, with_defaults
+    from .ui import IdentifyProgress, DownloadProgress, console, fmt_ts, header, summary, tracklist_table
+    cfg = with_defaults(load_config())
     if args.out:
         cfg["download_dir"] = args.out
+    if args.no_youtube:
+        cfg["youtube"]["fallback"] = False
+    if args.no_mp3:
+        cfg["convert"]["mp3"] = False
 
-    with console.status("Reading the video and looking for a tracklist…"):
+    with console.status("Reading the video and looking for a tracklist (YouTube, MixesDB, MusicBrainz)…"):
         if args.tracklist:
             tl = load_tracklist_file(args.tracklist, args.title or "mix")
         else:
@@ -111,13 +102,18 @@ async def run(args) -> int:
 
     out_dir = mix_folder(cfg, args.title or tl.source_title)
     ic = cfg["identify"]
-    want_id = args.identify or (ic["auto"] and not args.no_identify
-                                and tl.looks_incomplete(ic["max_avg_track_len"]))
-    if want_id and not args.tracklist:
-        why = "requested" if args.identify else (
-            "no tracklist found" if not tl.tracks else "tracklist looks incomplete")
+    mode = "always" if args.identify else "never" if (args.no_identify or not ic.get("auto", True)) else "auto"
+    why = None if args.tracklist else identify_reason(tl, mode, ic)
+    if why:
         console.print(f"[yellow]Identifying songs from the audio[/] [dim]({why})[/]")
-        await identify_into(tl, args.url, cfg, out_dir)
+        with IdentifyProgress() as ip:
+            maybe = await identify_into(tl, args.url, os.path.join(out_dir, ".identify"), ic,
+                                        ip.on_audio, ip.on_clips)
+        if maybe:
+            console.print("[dim]Low-confidence (heard once, skipped):[/]")
+            for h in maybe:
+                console.print(f"[dim]  ~{fmt_ts(h.at)}  {h.artist} – {h.title}[/]")
+        console.print()
 
     tracklist_table(tl)
     with open(os.path.join(out_dir, "tracklist.txt"), "w", encoding="utf-8") as f:
@@ -135,42 +131,54 @@ async def run(args) -> int:
         tracks = [t for t in tl.tracks if t.index in keep]
 
     from .soulseek import Downloader
-    results = {}
     dl = Downloader(cfg, os.path.expandvars(os.path.expanduser(cfg["download_dir"])))
     with console.status(f"Connecting to Soulseek as {cfg['soulseek']['username']}…"):
-        await dl.__aenter__()
+        try:
+            await dl.__aenter__()
+        except Exception as e:
+            if not cfg["youtube"]["fallback"]:
+                console.print(f"[red]Soulseek login failed:[/] {e}")
+                return 1
+            console.print(f"[yellow]Soulseek login failed ({e}); using YouTube only.[/]")
+            dl = None
+    eng = Engine(cfg, dl)
+    results = {}
     try:
         with DownloadProgress(tracks) as ui:
-            dl.on_status = ui.status
+            eng.on_status = ui.status
+            if dl:
+                dl.on_status = ui.status
 
             async def one(t):
                 try:
-                    results[t.index] = await dl.fetch(t, out_dir)
+                    r = await eng.fetch(t, out_dir)
                 except Exception as e:
                     log.debug("[%02d] error", t.index, exc_info=True)
-                    results[t.index] = (None, f"error: {e}")
-                path, msg = results[t.index]
-                if path:
-                    ui.status(t.index, "skip" if msg == "already downloaded" else "done",
-                              note=os.path.splitext(path)[1].lstrip("."))
+                    from .engine import Fetched
+                    r = Fetched(None, None, "", f"error: {e}")
+                results[t.index] = r
+                if r.path:
+                    note = os.path.splitext(r.path)[1].lstrip(".") + (" +mp3" if r.mp3 else "") + (" [YT]" if r.source == "youtube" else "")
+                    ui.status(t.index, "skip" if r.source == "cache" else "done", note=note)
                 else:
-                    ui.status(t.index, "missing", note=msg)
+                    ui.status(t.index, "missing", note=r.msg)
             await asyncio.gather(*(one(t) for t in tracks))
     finally:
-        with console.status("Disconnecting…"):
-            await dl.__aexit__(None, None, None)
+        if dl:
+            with console.status("Disconnecting…"):
+                await dl.__aexit__(None, None, None)
 
     if not args.keep_audio:
         shutil.rmtree(os.path.join(out_dir, ".identify"), ignore_errors=True)
-    missing = [t for t in tracks if not results[t.index][0]]
+    missing = [t for t in tracks if not results[t.index].path]
     with open(os.path.join(out_dir, "playlist.m3u"), "w", encoding="utf-8") as f:
         f.write("#EXTM3U\n")
         for t in tl.tracks:
             r = results.get(t.index)
-            if r and r[0]:
-                f.write(f"#EXTINF:-1,{t.label}\n{os.path.basename(r[0])}\n")
+            if r and r.path:
+                f.write(f"#EXTINF:-1,{t.label}\n{os.path.basename(r.path)}\n")
     with open(os.path.join(out_dir, "missing.txt"), "w", encoding="utf-8") as f:
-        f.writelines(f"{t.index:02d}. {t.label}  ({results[t.index][1]})\n" for t in missing)
+        f.writelines(f"{t.index:02d}. {t.label}  ({results[t.index].msg})\n" for t in missing)
     summary(tracks, results, out_dir)
     return 0 if not missing else 2
 
@@ -187,6 +195,8 @@ def main() -> None:
     p.add_argument("--only", help="comma-separated track numbers to download, e.g. 1,4,7")
     p.add_argument("--dry-run", action="store_true", help="show the tracklist, don't download")
     p.add_argument("--keep-audio", action="store_true", help="keep the downloaded mix audio")
+    p.add_argument("--no-youtube", action="store_true", help="don't fall back to YouTube for tracks Soulseek lacks")
+    p.add_argument("--no-mp3", action="store_true", help="don't make MP3 copies of lossless downloads")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING,
