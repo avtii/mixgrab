@@ -23,16 +23,23 @@ jobs:
           envs: VIDEO
           command_timeout: 10m
           script: |
-            U="https://www.youtube.com/watch?v=$VIDEO"
-            POT="youtubepot-bgutilhttp:base_url=http://mixgrab-pot:4416"
-            try() {  # $1 = label, rest = extra yt-dlp args; prints OK + title or the error
-              out=$(docker exec mixgrab yt-dlp --simulate --no-cache-dir --print title --extractor-args "$POT" "${@:2}" "$U" 2>&1 | tail -2)
-              case "$out" in *ERROR*) echo "$1: FAIL $(echo "$out" | grep ERROR | cut -c1-120)";; *) echo "$1: OK $out";; esac
-            }
-            try "plain"
-            echo "host IPv6 routes: $(ip -6 route show default | head -1)"
-            # IPv6 straight from the host network (the compose network has no IPv6)
-            POTIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mixgrab-pot)
-            out=$(docker run --rm --network host --entrypoint yt-dlp ghcr.io/avtii/mixgrab:latest -6 --simulate --no-cache-dir \
-              --print title --extractor-args "youtubepot-bgutilhttp:base_url=http://$POTIP:4416" "$U" 2>&1 | tail -2)
-            case "$out" in *ERROR*) echo "host-ipv6: FAIL $(echo "$out" | grep ERROR | cut -c1-120)";; *) echo "host-ipv6: OK $out";; esac
+            docker ps --filter name=mixgrab --format '{{.Names}} {{.Status}}'
+            # Can mixgrab read the sign-in browser's cookies? (counts only, never values)
+            docker exec mixgrab python -c "
+            import http.cookiejar as hc
+            from yt_dlp.cookies import extract_cookies_from_browser as x
+            from mixgrab.tracklist import _QuietLog
+            try:
+                jar = x('chromium', '/browser/Default', _QuietLog(), keyring='BASICTEXT')
+                g = [c for c in jar if c.domain.lstrip('.').endswith(('google.com', 'youtube.com'))]
+                print('sign-in browser: readable,', len(list(jar)), 'cookies,', len(g), 'google/youtube,',
+                      'signed in' if any(c.name in ('SAPISID', 'LOGIN_INFO') for c in g) else 'not signed in')
+            except Exception as e:
+                print('sign-in browser: NOT readable:', str(e)[:200])
+            "
+            # Does YouTube let the server through with the current cookies?
+            out=$(docker exec mixgrab sh -c 'yt-dlp --simulate --no-cache-dir --print title \
+              --extractor-args "youtubepot-bgutilhttp:base_url=http://mixgrab-pot:4416" \
+              $( [ -f /data/youtube-cookies.txt ] && echo --cookies /data/youtube-cookies.txt ) \
+              "https://www.youtube.com/watch?v='"$VIDEO"'"' 2>&1 | tail -2)
+            case "$out" in *ERROR*) echo "youtube: FAIL $(echo "$out" | grep ERROR | cut -c1-120)";; *) echo "youtube: OK $out";; esac
