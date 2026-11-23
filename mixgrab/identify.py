@@ -19,17 +19,33 @@ log = logging.getLogger("mixgrab")
 CLIP = 12  # Shazam's window; >=15 s returns no matches
 
 
-def find_ffmpeg() -> str:
+FFMPEG_HINT = {"win32": "winget install Gyan.FFmpeg", "darwin": "brew install ffmpeg"}
+
+
+def find_ffmpeg(required: bool = True) -> str | None:
+    """ffmpeg next to the executable, in ~/.mixgrab/bin, on PATH, or in the usual winget/Homebrew places."""
+    import sys
+    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    home = os.environ.get("MIXGRAB_HOME", os.path.join(os.path.expanduser("~"), ".mixgrab"))
+    local = [os.path.join(os.path.dirname(sys.executable), name), os.path.join(home, "bin", name)]
+    for p in local:
+        if getattr(sys, "frozen", False) or p.startswith(home):
+            if os.path.isfile(p):
+                return p
     exe = shutil.which("ffmpeg")
     if exe:
         return exe
     pats = [os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\*\bin\ffmpeg.exe"),
-            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe")]
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe"),
+            "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
     for p in pats:
         hits = glob.glob(p)
         if hits:
             return hits[0]
-    raise SystemExit("ffmpeg not found. Install it: winget install Gyan.FFmpeg")
+    if not required:
+        return None
+    raise SystemExit("ffmpeg not found. Install it: "
+                     + FFMPEG_HINT.get(sys.platform, "your package manager, e.g. apt install ffmpeg"))
 
 
 def download_audio(url: str, work_dir: str, progress=lambda done, total: None) -> str:

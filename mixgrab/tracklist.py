@@ -131,6 +131,21 @@ if not shutil.which("deno") and shutil.which("node"):
     YDL_EXTRA["js_runtimes"] = {"node": {}}   # YouTube needs a JS runtime; yt-dlp only enables deno by default
 
 
+def use_cookies(file: str | None = None, browser: str | None = None) -> None:
+    """Send YouTube cookies with every yt-dlp call: a cookies.txt file, or read live from a browser."""
+    YDL_EXTRA.pop("cookiefile", None)
+    YDL_EXTRA.pop("cookiesfrombrowser", None)
+    if file:
+        YDL_EXTRA["cookiefile"] = file
+    elif browser:
+        YDL_EXTRA["cookiesfrombrowser"] = (browser,)
+
+
+def is_bot_check(e: BaseException) -> bool:
+    s = str(e)
+    return "confirm you" in s and "bot" in s
+
+
 def _ydl(extra: dict) -> yt_dlp.YoutubeDL:
     opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noprogress": True}
     opts.update(YDL_EXTRA)

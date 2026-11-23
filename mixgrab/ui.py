@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from rich.console import Console
+from rich.markup import escape as esc
 from rich.panel import Panel
-from rich.progress import (BarColumn, DownloadColumn, Progress, TaskProgressColumn, TextColumn,
-                           TimeRemainingColumn, TransferSpeedColumn)
+from rich.progress import (BarColumn, DownloadColumn, Progress, ProgressColumn, TaskProgressColumn,
+                           TextColumn, TimeRemainingColumn, TransferSpeedColumn)
 from rich.table import Table
+from rich.text import Text
 
 from .tracklist import Tracklist
 
@@ -19,17 +21,17 @@ def fmt_ts(s) -> str:
 
 
 def header(title: str, url: str) -> None:
-    console.print(Panel.fit(f"[bold]{title}[/]\n[dim]{url}[/]", border_style="cyan"))
+    console.print(Panel.fit(f"[bold]{esc(title)}[/]\n[dim]{esc(url)}[/]", border_style="cyan"))
 
 
 def tracklist_table(tl: Tracklist) -> None:
-    t = Table(title=f"[bold]{len(tl.tracks)} tracks[/] [dim]· from {tl.found_in}[/]",
+    t = Table(title=f"[bold]{len(tl.tracks)} tracks[/] [dim]· from {esc(tl.found_in)}[/]",
               title_justify="left", box=None, pad_edge=False, show_header=False)
     t.add_column(justify="right", style="dim")
     t.add_column(justify="right", style="cyan")
     t.add_column()
     for tr in tl.tracks:
-        t.add_row(f"{tr.index:02d}", fmt_ts(tr.start), f"[bold]{tr.artist}[/] – {tr.title}")
+        t.add_row(f"{tr.index:02d}", fmt_ts(tr.start), f"[bold]{esc(tr.artist)}[/] – {esc(tr.title)}")
     console.print(t)
     console.print()
 
@@ -75,18 +77,28 @@ STATE_STYLE = {
 }
 
 
+class _TrackOnly(ProgressColumn):
+    """Byte/speed/ETA columns make no sense on the 'All' row (it counts tracks), so leave it blank there."""
+    def __init__(self, inner: ProgressColumn):
+        super().__init__()
+        self.inner = inner
+
+    def render(self, task):
+        return Text("") if task.fields.get("num") == "  " else self.inner.render(task)
+
+
 class DownloadProgress:
     def __init__(self, tracks):
         self.p = Progress(
             TextColumn("{task.fields[num]}", style="dim"),
-            TextColumn("{task.fields[name]}", style="bold"),
+            TextColumn("{task.fields[name]}", style="bold", markup=False),
             TextColumn("{task.fields[state]}"),
             BarColumn(bar_width=24),
             TaskProgressColumn(),
-            DownloadColumn(),
-            TransferSpeedColumn(),
-            TimeRemainingColumn(compact=True),
-            TextColumn("[dim]{task.fields[note]}"),
+            _TrackOnly(DownloadColumn()),
+            _TrackOnly(TransferSpeedColumn()),
+            _TrackOnly(TimeRemainingColumn(compact=True)),
+            TextColumn("{task.fields[note]}", style="dim", markup=False),
             console=console, expand=False, refresh_per_second=4,
         )
         self.tasks = {}
@@ -150,9 +162,9 @@ def summary(tracks, results, out_dir) -> None:
     ok = [t for t in tracks if results[t.index].path]
     console.print()
     style = "green" if len(ok) == len(tracks) else "yellow"
-    console.print(f"[bold {style}]Downloaded {len(ok)}/{len(tracks)}[/] → [link=file:///{out_dir}]{out_dir}[/]")
+    console.print(f"[bold {style}]Downloaded {len(ok)}/{len(tracks)}[/] → {esc(out_dir)}")
     for t in tracks:
         r = results[t.index]
         path, msg = r.path, r.msg
         if not path:
-            console.print(f"  [red]✗[/] {t.index:02d}. {t.label} [dim]— {msg}[/]")
+            console.print(f"  [red]✗[/] {t.index:02d}. {esc(t.label)} [dim]— {esc(msg)}[/]")

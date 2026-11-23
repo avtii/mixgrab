@@ -73,7 +73,7 @@ class Store:
 
 def friendly_error(e: Exception) -> str:
     s = str(e).replace("ERROR: ", "").strip()
-    if "confirm you" in s and "bot" in s:
+    if tlmod.is_bot_check(e):
         return ("YouTube blocked the server with a bot check. Upload YouTube cookies "
                 "(sidebar), then press Resume.")
     return s.split(" Use --cookies")[0][:300]
@@ -102,10 +102,7 @@ class Manager:
 
     def apply_cookies(self):
         """Point yt-dlp at the uploaded cookies.txt (or stop using it once removed)."""
-        if S.COOKIES_FILE.is_file():
-            tlmod.YDL_EXTRA["cookiefile"] = str(S.COOKIES_FILE)
-        else:
-            tlmod.YDL_EXTRA.pop("cookiefile", None)
+        tlmod.use_cookies(str(S.COOKIES_FILE) if S.COOKIES_FILE.is_file() else None)
 
     # ---------- lifecycle ----------
     async def start(self):

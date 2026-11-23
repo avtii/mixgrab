@@ -12,10 +12,18 @@ import sys
 import tomllib
 from pathlib import Path
 
-from .tracklist import Tracklist, fetch_tracklist, load_tracklist_file
+from . import __version__
+from .tracklist import Tracklist, fetch_tracklist, is_bot_check, load_tracklist_file, use_cookies
 
 CONFIG_DIR = Path(os.environ.get("MIXGRAB_HOME", Path.home() / ".mixgrab"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+COOKIES_PATH = CONFIG_DIR / "youtube-cookies.txt"
+
+BOT_HELP = f"""[red]YouTube asked mixgrab to sign in ("confirm you're not a bot").[/]
+Give it your YouTube cookies, once:
+  [bold]mixgrab --cookies cookies.txt URL[/]   cookies.txt exported from a browser signed in to youtube.com
+                                       (saved to {COOKIES_PATH}, used automatically from then on)
+  [bold]mixgrab --cookies-from-browser firefox URL[/]   read them live from Firefox/Safari/Edge/Chrome"""
 
 DEFAULT_CONFIG = """\
 # mixgrab configuration
@@ -51,6 +59,8 @@ max_avg_track_len = 600     # tracklist with fewer tracks than duration/this = i
 # [youtube]
 # fallback = true           # tracks not on Soulseek are taken from YouTube, saved as '... [YT].mp3'
 # quality = "0"             # LAME VBR 0 (best) .. 9, or a bitrate such as "320"
+# cookies = "~/cookies.txt"         # only if YouTube asks to sign in; or run once with --cookies FILE
+# cookies_from_browser = "firefox"  # alternative: read cookies live from a browser
 # Optional fallback recognizers for clips Shazam misses (SoundHound has no public API):
 # audd_token = ""           # https://audd.io (free quota)
 # [identify.acrcloud]       # https://www.acrcloud.com (best for DJ sets; free trial)
@@ -75,6 +85,51 @@ def load_config() -> dict:
         return tomllib.load(f)
 
 
+def setup_cookies(cfg: dict, args) -> None:
+    """--cookies FILE (remembered), --cookies-from-browser, [youtube] config, or a saved cookies file."""
+    yt = cfg.get("youtube", {})
+    if args.cookies:
+        src = Path(args.cookies).expanduser()
+        if not src.is_file():
+            raise SystemExit(f"cookies file not found: {src}")
+        if src.resolve() != COOKIES_PATH.resolve():
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, COOKIES_PATH)
+            print(f"Saved YouTube cookies to {COOKIES_PATH}; later runs use them automatically.")
+    browser = args.cookies_from_browser or yt.get("cookies_from_browser")
+    file = yt.get("cookies") or (str(COOKIES_PATH) if COOKIES_PATH.is_file() else None)
+    if browser and not args.cookies:
+        use_cookies(browser=browser)
+    elif file:
+        use_cookies(file=os.path.expanduser(file))
+
+
+def check() -> int:
+    """Report what mixgrab needs and where it looks."""
+    import platform
+    from .identify import FFMPEG_HINT, find_ffmpeg
+    ok = True
+    print(f"mixgrab {__version__} on {platform.system()} {platform.machine()}")
+    print(f"config:   {CONFIG_PATH} ({'exists' if CONFIG_PATH.exists() else 'created on first run'})")
+    ff = find_ffmpeg(required=False)
+    print(f"ffmpeg:   {ff or 'MISSING - install: ' + FFMPEG_HINT.get(sys.platform, 'apt install ffmpeg')}")
+    ok &= bool(ff)
+    js = shutil.which("deno") or shutil.which("node")
+    print(f"JS:       {js or 'MISSING - YouTube needs deno or node: ' + ('winget install DenoLand.Deno' if sys.platform == 'win32' else 'brew install deno')}")
+    ok &= bool(js)
+    print(f"cookies:  {COOKIES_PATH if COOKIES_PATH.is_file() else 'none (only needed if YouTube asks you to sign in)'}")
+    try:
+        cfg = load_config() if CONFIG_PATH.exists() else None
+        if cfg:
+            print(f"download: {os.path.expanduser(cfg['download_dir'])}")
+            print(f"soulseek: {cfg['soulseek']['username']}")
+    except Exception as e:
+        print(f"config error: {e}")
+        ok = False
+    print("ready" if ok else "fix the MISSING items above")
+    return 0 if ok else 1
+
+
 def mix_folder(cfg: dict, title: str) -> str:
     from .soulseek import safe_name
     d = os.path.join(os.path.expandvars(os.path.expanduser(cfg["download_dir"])), safe_name(title))
@@ -84,7 +139,7 @@ def mix_folder(cfg: dict, title: str) -> str:
 
 async def run(args) -> int:
     from .engine import Engine, identify_into, identify_reason, with_defaults
-    from .ui import IdentifyProgress, DownloadProgress, console, fmt_ts, header, summary, tracklist_table
+    from .ui import IdentifyProgress, DownloadProgress, console, esc, fmt_ts, header, summary, tracklist_table
     cfg = with_defaults(load_config())
     if args.out:
         cfg["download_dir"] = args.out
@@ -92,12 +147,19 @@ async def run(args) -> int:
         cfg["youtube"]["fallback"] = False
     if args.no_mp3:
         cfg["convert"]["mp3"] = False
+    setup_cookies(cfg, args)
 
-    with console.status("Reading the video and looking for a tracklist (YouTube, MixesDB, MusicBrainz)…"):
-        if args.tracklist:
-            tl = load_tracklist_file(args.tracklist, args.title or "mix")
-        else:
-            tl = await asyncio.to_thread(fetch_tracklist, args.url, lambda *a: None)
+    try:
+        with console.status("Reading the video and looking for a tracklist (YouTube, MixesDB, MusicBrainz)…"):
+            if args.tracklist:
+                tl = load_tracklist_file(args.tracklist, args.title or "mix")
+            else:
+                tl = await asyncio.to_thread(fetch_tracklist, args.url, lambda *a: None)
+    except Exception as e:
+        if not is_bot_check(e):
+            raise
+        console.print(BOT_HELP)
+        return 3
     header(args.title or tl.source_title, args.url)
 
     out_dir = mix_folder(cfg, args.title or tl.source_title)
@@ -105,14 +167,14 @@ async def run(args) -> int:
     mode = "always" if args.identify else "never" if (args.no_identify or not ic.get("auto", True)) else "auto"
     why = None if args.tracklist else identify_reason(tl, mode, ic)
     if why:
-        console.print(f"[yellow]Identifying songs from the audio[/] [dim]({why})[/]")
+        console.print(f"[yellow]Identifying songs from the audio[/] [dim]({esc(why)})[/]")
         with IdentifyProgress() as ip:
             maybe = await identify_into(tl, args.url, os.path.join(out_dir, ".identify"), ic,
                                         ip.on_audio, ip.on_clips)
         if maybe:
             console.print("[dim]Low-confidence (heard once, skipped):[/]")
             for h in maybe:
-                console.print(f"[dim]  ~{fmt_ts(h.at)}  {h.artist} – {h.title}[/]")
+                console.print(f"[dim]  ~{fmt_ts(h.at)}  {esc(h.artist)} – {esc(h.title)}[/]")
         console.print()
 
     tracklist_table(tl)
@@ -137,9 +199,9 @@ async def run(args) -> int:
             await dl.__aenter__()
         except Exception as e:
             if not cfg["youtube"]["fallback"]:
-                console.print(f"[red]Soulseek login failed:[/] {e}")
+                console.print(f"[red]Soulseek login failed:[/] {esc(str(e))}")
                 return 1
-            console.print(f"[yellow]Soulseek login failed ({e}); using YouTube only.[/]")
+            console.print(f"[yellow]Soulseek login failed ({esc(str(e))}); using YouTube only.[/]")
             dl = None
     eng = Engine(cfg, dl)
     results = {}
@@ -186,7 +248,12 @@ async def run(args) -> int:
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(prog="mixgrab", description=__doc__)
-    p.add_argument("url", help="YouTube video or playlist URL")
+    p.add_argument("url", nargs="?", help="YouTube video or playlist URL")
+    p.add_argument("--version", action="version", version=f"mixgrab {__version__}")
+    p.add_argument("--check", action="store_true", help="check ffmpeg, JS runtime, cookies and config, then exit")
+    p.add_argument("--cookies", metavar="FILE", help="YouTube cookies.txt (saved and reused) if YouTube asks to sign in")
+    p.add_argument("--cookies-from-browser", metavar="BROWSER",
+                   help="read YouTube cookies from firefox, safari, edge, chrome, brave…")
     p.add_argument("--out", help="download root (overrides config)")
     p.add_argument("--title", help="folder name for this mix")
     p.add_argument("--tracklist", help="text file with 'Artist - Title' lines (skip auto-detection)")
@@ -199,9 +266,14 @@ def main() -> None:
     p.add_argument("--no-mp3", action="store_true", help="don't make MP3 copies of lossless downloads")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
+    if args.check:
+        sys.exit(check())
+    if not args.url:
+        p.print_help()
+        sys.exit(1)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING,
                         format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
-    for noisy in ("aioslsk", "asyncio", "aiohttp", "shazamio"):
+    for noisy in ("aioslsk", "asyncio", "aiohttp", "aiohttp_retry", "shazamio"):
         logging.getLogger(noisy).setLevel(logging.DEBUG if args.verbose else logging.CRITICAL)
     sys.exit(asyncio.run(run(args)))
 

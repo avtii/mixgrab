@@ -1,5 +1,7 @@
-__pycache__/
 *.egg-info/
+*.spec.bak
+.env
+__pycache__/
 build/
 data/
-.env
+dist/
