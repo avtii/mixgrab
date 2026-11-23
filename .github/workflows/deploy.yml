@@ -121,7 +121,10 @@ jobs:
               true
             } > .env
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            docker compose pull
+            # one image at a time (parallel pulls can hit a containerd "lease does not exist" race), with a retry
+            for s in $(docker compose config --services); do
+              docker compose pull -q "$s" || { sleep 5; docker compose pull -q "$s"; }
+            done
             docker compose up -d
             docker logout ghcr.io
             # Caddy (burrball stack): (re)write the mixgrab site block when it's missing or outdated, then reload.
