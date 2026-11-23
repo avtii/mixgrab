@@ -25,8 +25,8 @@ def _persisted(name: str, make):
     if p.exists():
         return json.loads(p.read_text())
     v = make()
-    p.write_text(json.dumps(v))
-    os.chmod(p, 0o600)
+    with os.fdopen(os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "w") as f:   # owner-only from the start
+        f.write(json.dumps(v))
     return v
 
 

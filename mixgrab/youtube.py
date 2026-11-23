@@ -12,7 +12,7 @@ from typing import Optional
 import yt_dlp
 
 from .soulseek import VERSION_WORDS, norm, strip_parens, tokens
-from .tracklist import Track, YDL_EXTRA, run_ydl
+from .tracklist import Track, run_ydl, ydl_extra
 
 log = logging.getLogger("mixgrab")
 LONG_WORDS = {"mix", "set", "dj", "podcast", "album", "compilation", "hour", "hours", "megamix", "full",
@@ -84,7 +84,7 @@ def find(t: Track, results: int = 8, site: str = "youtube") -> Optional[dict]:
     st = SITES[site]
     q = f"{st.search}{results}:{t.artist} - {t.title}"
     opts = {"quiet": True, "no_warnings": True, "skip_download": True, "extract_flat": True}
-    opts.update(YDL_EXTRA)
+    opts.update(ydl_extra())
     with yt_dlp.YoutubeDL(opts) as y:
         info = y.extract_info(q, download=False)
     best, best_s = None, None
@@ -100,10 +100,12 @@ def find(t: Track, results: int = 8, site: str = "youtube") -> Optional[dict]:
 def _no_previews(ctx):
     """yt-dlp format selector: never settle for a SoundCloud 30-second preview."""
     fmts = [f for f in ctx.get("formats") or [] if "preview" not in (f.get("format_id") or "")
-            and f.get("acodec") != "none"]
+            and f.get("acodec") != "none" and f.get("ext") != "mhtml"]
     if not fmts:
         return
-    yield max(fmts, key=lambda f: (f.get("abr") or f.get("tbr") or 0, f.get("quality") or 0))
+    # known audio-only formats first (acodec None means unknown, which may be a video), then bitrate
+    yield max(fmts, key=lambda f: (f.get("acodec") is not None, f.get("vcodec") in (None, "none"),
+                                   f.get("abr") or f.get("tbr") or 0, f.get("quality") or 0))
 
 
 def download(entry: dict, dest_noext: str, ffmpeg: str, quality: str = "0",

@@ -78,12 +78,16 @@ log = logging.getLogger("mixgrab")
 
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(DEFAULT_CONFIG.format(
+        CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        text = DEFAULT_CONFIG.format(
             download_dir=str(Path.home() / "Music" / "mixgrab").replace("\\", "/"),
             username=f"mixgrab_{secrets.token_hex(3)}",
             password=secrets.token_urlsafe(12),
-        ), encoding="utf-8")
+        )
+        # it holds the Soulseek password: owner-only from the start
+        with os.fdopen(os.open(CONFIG_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "w",
+                       encoding="utf-8") as f:
+            f.write(text)
         print(f"Created config at {CONFIG_PATH}")
     with open(CONFIG_PATH, "rb") as f:
         return tomllib.load(f)
@@ -97,8 +101,9 @@ def setup_cookies(cfg: dict, args) -> None:
         if not src.is_file():
             raise SystemExit(f"cookies file not found: {src}")
         if src.resolve() != COOKIES_PATH.resolve():
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
             shutil.copyfile(src, COOKIES_PATH)
+            os.chmod(COOKIES_PATH, 0o600)
             print(f"Saved YouTube cookies to {COOKIES_PATH}; later runs use them automatically.")
     browser = args.cookies_from_browser or yt.get("cookies_from_browser")
     file = yt.get("cookies") or (str(COOKIES_PATH) if COOKIES_PATH.is_file() else None)
@@ -296,9 +301,12 @@ def sync(args) -> int:
     if drive and not os.path.exists(drive + os.sep):
         console.print(f"[red]Drive {esc(drive)} isn't there.[/] Plug in the USB stick, or check the letter.")
         return 1
-    lib, dst = os.path.normcase(os.path.abspath(library)), os.path.normcase(os.path.abspath(dest))
-    if os.path.splitdrive(lib)[0] == os.path.splitdrive(dst)[0] and os.path.commonpath([lib, dst]) in (lib, dst):
+    if sy.overlaps(library, dest):
         console.print("[red]The source and the destination overlap.[/] Pick another folder or drive.")
+        return 1
+    dst = os.path.normcase(os.path.abspath(dest))
+    if args.mirror and os.path.islink(dest):
+        console.print("[red]--mirror won't run on a destination that is a link.[/] Give the real folder.")
         return 1
     if args.mirror and os.path.dirname(dst) == dst:
         console.print("[red]--mirror won't run on a whole drive.[/] Give a folder, e.g. D:\\Music.")

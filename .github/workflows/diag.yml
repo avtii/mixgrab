@@ -7,11 +7,23 @@ on:
         description: YouTube video ID to test
         default: t6oJzp6SwNo
 
+permissions:
+  contents: read
+
 jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - uses: appleboy/ssh-action@v1.2.0
+      # The ID ends up inside a shell command on the server: allow only a real YouTube video ID.
+      - name: Check the video ID
+        env:
+          VIDEO: ${{ inputs.video }}
+        run: |
+          if ! printf '%s' "$VIDEO" | grep -Eq '^[A-Za-z0-9_-]{11}$'; then
+            echo "::error::'video' must be an 11-character YouTube video ID"
+            exit 1
+          fi
+      - uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
         env:
           VIDEO: ${{ inputs.video }}
         with:
