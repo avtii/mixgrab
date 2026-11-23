@@ -1,9 +1,9 @@
 # mixgrab
 
-Paste a YouTube DJ set, mix, album or playlist. mixgrab finds the tracklist and downloads every track.
+Paste a DJ set, mix, album or playlist from YouTube, SoundCloud or Mixcloud. mixgrab finds the tracklist and downloads every track.
 
-- **Finding the tracklist**: mixgrab reads the video's chapters, description and comments, then checks MixesDB and MusicBrainz. If there's still no tracklist, it identifies the songs from the audio.
-- **Downloading**: each track comes from Soulseek. If a track isn't there, mixgrab takes it from YouTube instead and marks the file `[YT]`.
+- **Finding the tracklist**: mixgrab reads the chapters, description and comments (on Mixcloud, the tracklist shown under the show), then checks MixesDB and MusicBrainz. If there's still no tracklist, it identifies the songs from the audio.
+- **Downloading**: each track comes from Soulseek. If a track isn't there, mixgrab takes it from YouTube (file marked `[YT]`), and failing that from SoundCloud (`[SC]`).
 - **MP3 copies**: lossless files (FLAC, WAV and similar) also get an MP3 copy saved next to them.
 
 ![mixgrab in a terminal: tracklist from chapters, then per-track download bars](docs/screenshots/cli.png)
@@ -68,7 +68,8 @@ mixgrab URL --dry-run                                   # just show the tracklis
 mixgrab URL --only 3,7                                  # download only some tracks
 mixgrab URL --identify                                  # always identify songs from the audio
 mixgrab URL --tracklist my_list.txt                     # your own "Artist - Title" lines
-mixgrab URL --no-youtube                                # Soulseek only, no [YT] fallback
+mixgrab URL --no-youtube                                # no [YT] fallback
+mixgrab URL --no-soundcloud                             # no [SC] fallback (both flags: Soulseek only)
 mixgrab URL --no-mp3                                    # keep FLAC/WAV only, no MP3 copies
 mixgrab URL --out D:\Music                              # download somewhere else this time
 ```
@@ -77,7 +78,7 @@ On the first run, mixgrab creates `~/.mixgrab/config.toml`. It contains your dow
 
 Each mix goes into its own folder: `<download_dir>/<mix title>/`. The folder contains:
 - `NN - Artist - Title.flac` plus `NN - Artist - Title.mp3`;
-- `NN - Artist - Title [YT].mp3`, for tracks that came from YouTube;
+- `NN - Artist - Title [YT].mp3` / `[SC].mp3`, for tracks that came from YouTube / SoundCloud;
 - `tracklist.txt`, `playlist.m3u` and `missing.txt`.
 
 If you run the same URL again, mixgrab skips the tracks it already has.
@@ -133,7 +134,8 @@ Recent Chrome versions on Windows encrypt their cookies, so `--cookies-from-brow
 
    mixgrab tries up to 6 peers. It drops a peer whose queue doesn't move or whose transfer stalls.
 2. **YouTube fallback**. mixgrab prefers "Artist - Topic" channels and "official audio" uploads, and rejects mixes, live versions and covers. The file is saved as MP3 with `[YT]` in its name.
-3. **MP3 copy**. Each lossless file gets a 320 kbps MP3 copy next to it, with the tags kept.
+3. **SoundCloud fallback**, for tracks YouTube doesn't have either. Only exact, full tracks: 30-second previews, clips, mashups and unrequested remixes or edits are skipped. Saved as MP3 with `[SC]` in its name.
+4. **MP3 copy**. Each lossless file gets a 320 kbps MP3 copy next to it, with the tags kept.
 
 ## Config
 These sections in `~/.mixgrab/config.toml` are optional:
@@ -201,6 +203,7 @@ Then press **Resume** on the failed job.
 | `LINK_TTL_MIN` | 1440 | how long a file link stays valid |
 | `CONVERT_MP3` / `MP3_BITRATE` | 1 / 320 | MP3 copies |
 | `YOUTUBE_FALLBACK` / `YOUTUBE_QUALITY` | 1 / 0 | YouTube fallback |
+| `SOUNDCLOUD_FALLBACK` | 1 | SoundCloud fallback (MP3 quality follows `YOUTUBE_QUALITY`) |
 | `POT_URL` | (none; `http://mixgrab-pot:4416` in the compose file) | bgutil PO-token provider, so YouTube needs no cookies |
 | `BROWSER_PROFILE` | (none; `/browser/Default` in the compose file) | the sign-in browser's Chromium profile, mounted read-only |
 | `LOGIN_PATH` | `/yt-login/` | where the reverse proxy serves the sign-in browser |
