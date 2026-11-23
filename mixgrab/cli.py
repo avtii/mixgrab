@@ -275,29 +275,39 @@ async def run(args) -> int:
     return 0 if not missing else 2
 
 
-def sync(args, cfg: dict) -> int:
-    """mixgrab --sync D: copy the library to a USB drive, only what is new or changed."""
+def sync(args) -> int:
+    """mixgrab --sync [SOURCE] DEST: copy a folder (the library by default) to a USB drive or any
+    other folder, only what is new or changed."""
     from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
     from . import sync as sy
     from .ui import console, esc
-    library = os.path.expandvars(os.path.expanduser(args.out or cfg["download_dir"]))
-    if not os.path.isdir(library):
-        console.print(f"[red]Library folder not found:[/] {esc(library)}")
+    if len(args.sync) > 2:
+        console.print("[red]--sync takes a destination, or a source and a destination.[/]")
         return 1
-    dest = sy.resolve_dest(args.sync, library)
+    if len(args.sync) == 2:
+        library = sy.resolve_source(args.sync[0])
+    else:
+        library = os.path.expandvars(os.path.expanduser(args.out or load_config()["download_dir"]))
+    if not os.path.isdir(library):
+        console.print(f"[red]Source folder not found:[/] {esc(library)}")
+        return 1
+    dest = sy.resolve_dest(args.sync[-1], library)
     drive = os.path.splitdrive(dest)[0]
     if drive and not os.path.exists(drive + os.sep):
         console.print(f"[red]Drive {esc(drive)} isn't there.[/] Plug in the USB stick, or check the letter.")
         return 1
     lib, dst = os.path.normcase(os.path.abspath(library)), os.path.normcase(os.path.abspath(dest))
     if os.path.splitdrive(lib)[0] == os.path.splitdrive(dst)[0] and os.path.commonpath([lib, dst]) in (lib, dst):
-        console.print("[red]The destination and the library overlap.[/] Pick another folder or drive.")
+        console.print("[red]The source and the destination overlap.[/] Pick another folder or drive.")
         return 1
-    with console.status("Comparing the library with the drive…"):
+    if args.mirror and os.path.dirname(dst) == dst:
+        console.print("[red]--mirror won't run on a whole drive.[/] Give a folder, e.g. D:\\Music.")
+        return 1
+    with console.status("Comparing the source with the destination…"):
         p = sy.plan(library, dest, mp3_only=args.mp3_only, mirror=args.mirror)
     console.print(f"[bold]{esc(library)}[/] → [bold]{esc(dest)}[/]")
     console.print(f"{len(p.copy)} to copy ({p.bytes / 1e6:,.0f} MB), {p.same} already there"
-                  + (f", {len(p.remove)} on the drive but not in the library" if args.mirror else "")
+                  + (f", {len(p.remove)} in the destination but not in the source" if args.mirror else "")
                   + (", MP3 copies instead of lossless files" if args.mp3_only else ""))
     probe = dest
     while not os.path.exists(probe) and os.path.dirname(probe) != probe:
@@ -320,7 +330,7 @@ def sync(args, cfg: dict) -> int:
             console.print("[red]--mirror would delete files; run it in a terminal to confirm.[/]")
             return 1
         try:
-            ans = console.input(f"[yellow]Delete {len(p.remove)} files from {esc(dest)} that aren't in the library?[/] [y/N] ")
+            ans = console.input(f"[yellow]Delete {len(p.remove)} files from {esc(dest)} that aren't in the source?[/] [y/N] ")
         except EOFError:
             ans = ""
         if ans.strip().lower() not in ("y", "yes"):
@@ -338,7 +348,8 @@ def sync(args, cfg: dict) -> int:
     ok = len(p.copy) + len(p.remove) - len(errors)
     console.print(f"[bold {'yellow' if errors else 'green'}]Synced[/] {ok} files"
                   + (f", {len(errors)} failed" if errors else "")
-                  + ". [dim]Eject the drive before unplugging it.[/]")
+                  + (". [dim]Eject the drive before unplugging it.[/]"
+                     if os.path.splitdrive(lib)[0] != os.path.splitdrive(dst)[0] else "."))
     return 2 if errors else 0
 
 
@@ -362,11 +373,11 @@ def main() -> None:
     p.add_argument("--no-youtube", action="store_true", help="don't fall back to YouTube for tracks Soulseek lacks")
     p.add_argument("--no-soundcloud", action="store_true", help="don't fall back to SoundCloud for tracks Soulseek lacks")
     p.add_argument("--no-mp3", action="store_true", help="don't make MP3 copies of lossless downloads")
-    p.add_argument("--sync", metavar="DEST",
-                   help="copy the library to a USB drive or folder, only new or changed files, then exit. "
-                        "A drive letter (D or D:) means D:/<library folder name>")
+    p.add_argument("--sync", nargs="+", metavar="PATH",
+                   help="--sync DEST copies the library, --sync SOURCE DEST copies any folder; only new or changed "
+                        "files, then exit. A bare drive letter as DEST (D or D:) means D:/<source folder name>")
     p.add_argument("--mp3-only", action="store_true", help="with --sync: send the MP3 copy instead of FLAC/WAV when there is one")
-    p.add_argument("--mirror", action="store_true", help="with --sync: also delete files on the drive that the library no longer has (asks first)")
+    p.add_argument("--mirror", action="store_true", help="with --sync: also delete files in DEST that the source no longer has (asks first)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--export-cookies", nargs="?", const="auto", metavar="BROWSER",
                    help="find your YouTube cookies in a browser (all of them, or the one named), save them to "
@@ -377,7 +388,7 @@ def main() -> None:
     if args.export_cookies:
         sys.exit(export_cookies(None if args.export_cookies == "auto" else args.export_cookies))
     if args.sync:
-        sys.exit(sync(args, load_config()))
+        sys.exit(sync(args))
     if not args.url:
         p.print_help()
         sys.exit(1)

@@ -12,12 +12,24 @@ SKIP_SUFFIX = (".part", ".tmp", ".ytdl")
 FAT_SLACK = 2          # FAT/exFAT keep modification times to 2 seconds
 
 
-def resolve_dest(dest: str, library: str) -> str:
-    """'D', 'D:' or 'D:\\' mean a folder named like the library on that drive; anything else is used as is."""
+DRIVE_RE = re.compile(r"[A-Za-z]:?[\\/]?")
+
+
+def resolve_source(src: str) -> str:
+    """A folder, or a bare drive letter ('E', 'E:') for the whole drive."""
+    s = src.strip().strip('"')
+    if DRIVE_RE.fullmatch(s):
+        return s[0].upper() + ":\\"
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(s)))
+
+
+def resolve_dest(dest: str, source: str) -> str:
+    """'D', 'D:' or 'D:\\' mean a folder named like the source on that drive (the drive's root when
+    the source is itself a whole drive); anything else is used as is."""
     d = dest.strip().strip('"')
-    if re.fullmatch(r"[A-Za-z]:?[\\/]?", d):
-        return os.path.join(d[0].upper() + ":\\", os.path.basename(os.path.normpath(library)))
-    return os.path.abspath(os.path.expanduser(d))
+    if DRIVE_RE.fullmatch(d):
+        return os.path.join(d[0].upper() + ":\\", os.path.basename(os.path.normpath(source)))
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(d)))
 
 
 @dataclass
