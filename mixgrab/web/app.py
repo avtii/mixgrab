@@ -227,7 +227,8 @@ async def delete_cookies():
 
 
 # ---------------- jobs ----------------
-URL_RE = re.compile(r"^https?://(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/", re.I)
+URL_RE = re.compile(r"^https?://((www\.|m\.|music\.)?(youtube\.com|youtu\.be)|(www\.|m\.|on\.)?soundcloud\.com"
+                    r"|(www\.|m\.)?mixcloud\.com)/", re.I)
 
 
 class NewJob(BaseModel):
@@ -262,7 +263,7 @@ def get_job(job_id: str) -> dict:
 async def create_job(body: NewJob):
     url = body.url.strip()
     if not URL_RE.match(url):
-        raise HTTPException(400, "Paste a YouTube video or playlist URL.")
+        raise HTTPException(400, "Paste a YouTube, SoundCloud or Mixcloud link.")
     if body.identify not in ("auto", "always", "never"):
         raise HTTPException(400, "bad identify mode")
     return public_job(mgr.create(url, body.identify))

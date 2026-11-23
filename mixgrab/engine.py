@@ -1,6 +1,6 @@
 """The mixgrab engine: the back end shared by the command-line tool and the web app.
 
-Per track:  Soulseek  ->  (not found)  YouTube fallback, saved as 'NN - Artist - Title [YT].mp3'
+Per track:  Soulseek  ->  (not found)  YouTube, then SoundCloud, saved as 'NN - Artist - Title [YT].mp3' / '[SC]'
             then lossless files (FLAC/WAV/AIFF) get an MP3 copy next to them.
 Both front ends call Engine.fetch(); the CLI drives one run, the web app keeps one Engine (and one
 Soulseek login: the network allows one session per account) for all its jobs.
@@ -20,10 +20,11 @@ from .soulseek import LOSSLESS, STATUS_CB, Downloader, safe_name
 from .tracklist import Track
 
 log = logging.getLogger("mixgrab")
-YT_TAG = " [YT]"
+YT_TAG = youtube.SITES["youtube"].tag
 DEFAULTS = {
     "convert": {"mp3": True, "bitrate": 320},          # MP3 copy of every lossless download
     "youtube": {"fallback": True, "quality": "0"},     # quality: LAME VBR 0 (best) .. 9, or a bitrate like "320"
+    "soundcloud": {"fallback": True},                  # MP3 quality follows [youtube] quality
 }
 
 
@@ -39,7 +40,7 @@ def with_defaults(cfg: dict) -> dict:
 class Fetched:
     path: Optional[str]          # the downloaded file (FLAC, MP3, ...), None if not found anywhere
     mp3: Optional[str] = None    # MP3 made from a lossless download, next to it
-    source: str = ""             # soulseek | youtube | cache
+    source: str = ""             # soulseek | youtube | soundcloud | cache
     msg: str = ""                # human-readable detail / reason for failure
 
 
@@ -54,7 +55,7 @@ def existing(out_dir: str, t: Track) -> Optional[tuple[str, Optional[str], str]]
         names = os.listdir(out_dir)
     except OSError:
         return None
-    mine = [n for n in names if (n.startswith(prefix + ".") or n.startswith(prefix + YT_TAG + "."))
+    mine = [n for n in names if (n.startswith(prefix + ".") or n.startswith(tuple(prefix + tg + "." for tg in youtube.TAGS)))
             and not n.endswith((".part", ".tmp")) and ".yt." not in n]
     if not mine:
         return None
@@ -74,7 +75,7 @@ class Engine:
         self.dl = dl
         self.ffmpeg = find_ffmpeg()
         self.on_status = lambda idx, state, **info: None
-        self.yt_sem = asyncio.Semaphore(2)
+        self.site_sem = {k: asyncio.Semaphore(2) for k in youtube.SITES}
         self.convert_sem = asyncio.Semaphore(max(1, (os.cpu_count() or 2) // 2))
 
     def _status(self, idx, state, **info):
@@ -105,43 +106,46 @@ class Engine:
                 log.debug("[%02d] soulseek error", t.index, exc_info=True)
                 path, msg = None, f"Soulseek error: {e}"
 
-        if not path and self.cfg["youtube"]["fallback"]:
-            yt_path, yt_msg = await self._youtube(t, out_dir)
-            if yt_path:
-                path, source, msg = yt_path, "youtube", f"{yt_msg} (Soulseek: {msg})"
+        for site in youtube.SITES.values():
+            if path or not self.cfg.get(site.key, {}).get("fallback"):
+                continue
+            got, why = await self._site(site, t, out_dir)
+            if got:
+                path, source, msg = got, site.key, f"{why} (Soulseek: {msg})"
             else:
-                msg = f"{msg}; YouTube: {yt_msg}"
+                msg = f"{msg}; {site.name}: {why}"
         if not path:
             return Fetched(None, None, "", msg)
         mp3 = await self._maybe_mp3(t, path)
         return Fetched(path, mp3, source, msg)
 
-    async def _youtube(self, t: Track, out_dir: str) -> tuple[Optional[str], str]:
-        self._status(t.index, "youtube")
-        async with self.yt_sem:
+    async def _site(self, site, t: Track, out_dir: str) -> tuple[Optional[str], str]:
+        self._status(t.index, site.key)
+        async with self.site_sem[site.key]:
             try:
-                entry = await asyncio.to_thread(youtube.find, t)
+                entry = await asyncio.to_thread(youtube.find, t, 8, site.key)
             except Exception as e:
-                return None, f"search failed ({e})"
+                return None, f"search failed ({str(e)[:120]})"
             if not entry:
-                return None, "no matching video"
-            self._status(t.index, "downloading", done=0, total=0, user="YouTube", attempt="YT")
-            dest = os.path.join(out_dir, track_prefix(t) + YT_TAG)
+                return None, "no match"
+            busy = lambda done, total: self._status(t.index, "downloading", done=done, total=total,
+                                                    user=site.name, attempt=site.short)
+            busy(0, 0)
+            dest = os.path.join(out_dir, track_prefix(t) + site.tag)
             path, err = None, None
             for attempt in range(3):                   # whole-download retries on top of yt-dlp's own
                 try:
                     path = await asyncio.to_thread(
                         youtube.download, entry, dest, self.ffmpeg, str(self.cfg["youtube"]["quality"]),
-                        lambda done, total: self._status(t.index, "downloading", done=done, total=total,
-                                                         user="YouTube", attempt="YT"))
+                        busy, site.key)
                     break
                 except Exception as e:
                     err = e
-                    log.debug("[%02d] youtube download attempt %d failed", t.index, attempt + 1, exc_info=True)
+                    log.debug("[%02d] %s download attempt %d failed", t.index, site.name, attempt + 1, exc_info=True)
                     await asyncio.sleep(5 * (attempt + 1))
             if not path:
                 return None, f"download failed ({str(err)[:120]})"
-        return path, f"YouTube: {entry.get('title')} ({entry.get('channel') or entry.get('uploader')})"
+        return path, f"{site.name}: {entry.get('title')} ({entry.get('channel') or entry.get('uploader')})"
 
     async def _maybe_mp3(self, t: Track, path: str) -> Optional[str]:
         ext = os.path.splitext(path)[1].lstrip(".").lower()

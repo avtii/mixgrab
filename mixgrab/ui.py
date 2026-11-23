@@ -70,6 +70,7 @@ STATE_STYLE = {
     "downloading": "[cyan]downloading[/]",
     "retry": "[yellow]retrying[/]",
     "youtube": "[blue]trying YouTube[/]",
+    "soundcloud": "[blue]trying SoundCloud[/]",
     "converting": "[cyan]→ mp3[/]",
     "done": "[green]✓ done[/]",
     "skip": "[green]✓ have it[/]",
@@ -146,8 +147,8 @@ class DownloadProgress:
             task = self.p.tasks[[t.id for t in self.p.tasks].index(tid)]
             upd["total"] = task.total or 1
             upd["completed"] = upd["total"]
-        elif state == "youtube":
-            upd["note"] = "not on Soulseek"
+        elif state in ("youtube", "soundcloud"):
+            upd["note"] = "not on Soulseek" if state == "youtube" else "not on Soulseek/YouTube"
             upd["completed"] = 0
         elif state == "converting":
             upd["note"] = "flac → mp3"
