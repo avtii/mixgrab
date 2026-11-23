@@ -1,0 +1,134 @@
+"""Copy the music library to a USB drive (or any folder), sending only what is new or changed."""
+from __future__ import annotations
+
+import os
+import re
+import shutil
+from dataclasses import dataclass, field
+
+AUDIO = {".mp3", ".flac", ".wav", ".aiff", ".aif", ".m4a", ".ogg", ".opus", ".wma", ".ape", ".alac"}
+LOSSLESS = {".flac", ".wav", ".aiff", ".aif", ".ape", ".alac"}
+SKIP_SUFFIX = (".part", ".tmp", ".ytdl")
+FAT_SLACK = 2          # FAT/exFAT keep modification times to 2 seconds
+
+
+def resolve_dest(dest: str, library: str) -> str:
+    """'D', 'D:' or 'D:\\' mean a folder named like the library on that drive; anything else is used as is."""
+    d = dest.strip().strip('"')
+    if re.fullmatch(r"[A-Za-z]:?[\\/]?", d):
+        return os.path.join(d[0].upper() + ":\\", os.path.basename(os.path.normpath(library)))
+    return os.path.abspath(os.path.expanduser(d))
+
+
+@dataclass
+class Plan:
+    copy: list[tuple[str, str, int]] = field(default_factory=list)   # (src, dst, size)
+    same: int = 0
+    remove: list[str] = field(default_factory=list)                   # with mirror: files only on the drive
+    playlists: list[tuple[str, str]] = field(default_factory=list)    # m3u to rewrite for mp3-only
+
+    @property
+    def bytes(self) -> int:
+        return sum(s for _, _, s in self.copy)
+
+
+def _wanted(root: str, mp3_only: bool) -> dict[str, str]:
+    """Relative path -> source path for every library file worth copying."""
+    out = {}
+    for d, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if not x.startswith("."))     # .identify scratch, hidden folders
+        names = set(files)
+        for n in sorted(files):
+            if n.startswith(".") or n.endswith(SKIP_SUFFIX) or ".yt." in n:
+                continue
+            stem, ext = os.path.splitext(n)
+            if mp3_only and ext.lower() in LOSSLESS and f"{stem}.mp3" in names:
+                continue                                    # its MP3 copy goes instead
+            src = os.path.join(d, n)
+            out[os.path.relpath(src, root)] = src
+    return out
+
+
+def _unchanged(src: str, dst: str) -> bool:
+    try:
+        a, b = os.stat(src), os.stat(dst)
+    except OSError:
+        return False
+    return a.st_size == b.st_size and abs(a.st_mtime - b.st_mtime) <= FAT_SLACK
+
+
+def plan(library: str, dest: str, mp3_only: bool = False, mirror: bool = False) -> Plan:
+    p = Plan()
+    want = _wanted(library, mp3_only)
+    for rel, src in want.items():
+        dst = os.path.join(dest, rel)
+        if mp3_only and rel.lower().endswith(".m3u"):
+            p.playlists.append((src, dst))
+            continue
+        if _unchanged(src, dst):
+            p.same += 1
+        else:
+            p.copy.append((src, dst, os.path.getsize(src)))
+    if mirror and os.path.isdir(dest):
+        for d, dirs, files in os.walk(dest):
+            dirs[:] = [x for x in dirs if not x.startswith(".")]
+            for n in files:
+                full = os.path.join(d, n)
+                if os.path.relpath(full, dest) not in want:
+                    p.remove.append(full)
+    return p
+
+
+def _mp3_playlist(src: str, dst: str):
+    """The library playlist with lossless entries pointed at their MP3 copies."""
+    folder = os.path.dirname(src)
+    lines = []
+    with open(src, encoding="utf-8") as f:
+        for line in f.read().splitlines():
+            stem, ext = os.path.splitext(line)
+            if line and not line.startswith("#") and ext.lower() in LOSSLESS \
+                    and os.path.exists(os.path.join(folder, stem + ".mp3")):
+                line = stem + ".mp3"
+            lines.append(line)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(dst, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def run(p: Plan, dest: str, progress=lambda done_bytes, name: None) -> list[tuple[str, str]]:
+    """Carry out a plan. Returns (file, error) for files that failed; the rest still go."""
+    errors = []
+    done = 0
+    for src, dst, size in p.copy:
+        progress(done, os.path.basename(src))
+        tmp = dst + ".part"
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, tmp)                  # a pulled stick leaves a .part, never a cut-off song
+            os.replace(tmp, dst)
+        except OSError as e:
+            errors.append((src, e.strerror or str(e)))
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        done += size
+        progress(done, os.path.basename(src))
+    for src, dst in p.playlists:
+        try:
+            _mp3_playlist(src, dst)
+        except OSError as e:
+            errors.append((src, e.strerror or str(e)))
+    for f in p.remove:
+        try:
+            os.remove(f)
+        except OSError as e:
+            errors.append((f, e.strerror or str(e)))
+    if p.remove:                                    # drop folders the mirror emptied
+        for d in sorted((w[0] for w in os.walk(dest)), key=len, reverse=True):
+            if d != dest and not os.listdir(d):
+                try:
+                    os.rmdir(d)
+                except OSError:
+                    pass
+    return errors
