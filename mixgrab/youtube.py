@@ -55,7 +55,8 @@ def _score(e: dict, t: Track, site: Site = SITES["youtube"]) -> Optional[float]:
     s = 10 * tf + 5 * af
     wanted = set(norm(t.title).split())
     s -= 4 * len((title_words & VERSION_WORDS) - wanted)
-    dur = e.get("duration") or 0
+    dur = e.get("duration")
+    dur = dur if isinstance(dur, (int, float)) else 0   # flat search results sometimes leave it out or odd
     if dur and (dur < 60 or dur > 20 * 60):
         return None                                    # a snippet (or SoundCloud 30 s preview), or a whole mix
     if (title_words & LONG_WORDS) - wanted and dur > 12 * 60:
@@ -88,7 +89,9 @@ def find(t: Track, results: int = 8, site: str = "youtube") -> Optional[dict]:
     with yt_dlp.YoutubeDL(opts) as y:
         info = y.extract_info(q, download=False)
     best, best_s = None, None
-    for e in info.get("entries") or []:
+    for e in (info or {}).get("entries") or []:
+        if not isinstance(e, dict) or not (e.get("url") or e.get("id")):
+            continue                                   # dead or malformed result
         s = _score(e, t, st)
         log.debug("[%02d] %s %r (%s, %ss) -> %s", t.index, st.short, e.get("title"),
                   e.get("channel") or e.get("uploader"), e.get("duration"), s)
@@ -122,15 +125,22 @@ def download(entry: dict, dest_noext: str, ffmpeg: str, quality: str = "0",
                                {"key": "FFmpegMetadata"}],
             "progress_hooks": [lambda d: progress(d.get("downloaded_bytes") or 0,
                                                   d.get("total_bytes") or d.get("total_bytes_estimate") or 0)]}
-    run_ydl(opts, lambda y: y.download([url]))
-    out = dest_noext + ".yt.mp3"
-    if not os.path.exists(out):
-        raise RuntimeError(f"{SITES[site].name} download produced no MP3")
-    final = dest_noext + ".mp3"
-    os.replace(out, final)
+    try:
+        run_ydl(opts, lambda y: y.download([url]))
+        out = dest_noext + ".yt.mp3"
+        if not os.path.exists(out) or os.path.getsize(out) == 0:
+            raise RuntimeError(f"{SITES[site].name} download produced no MP3")
+        final = dest_noext + ".mp3"
+        os.replace(out, final)
+        return final
+    finally:
+        remove_partials(dest_noext)
+
+
+def remove_partials(dest_noext: str):
+    """Delete the '.yt.*' working files of a download (finished or not)."""
     for leftover in glob.glob(glob.escape(dest_noext) + ".yt.*"):
         try:
             os.remove(leftover)
         except OSError:
             pass
-    return final

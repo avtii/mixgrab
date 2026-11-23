@@ -5,8 +5,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
+import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -27,6 +30,7 @@ class Store:
     def __init__(self, path):
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute("pragma journal_mode=wal")
+        self._touched: dict[str, float] = {}
         self.db.execute("create table if not exists jobs(id text primary key, created real, data text)")
         self.db.execute("create table if not exists files(id text primary key, job_id text, track int,"
                         " path text, size int, created real, last_access real)")
@@ -56,7 +60,12 @@ class Store:
         return dict(zip(("id", "job_id", "track", "path", "size"), r)) if r else None
 
     def touch(self, fid):
-        self.db.execute("update files set last_access=? where id=?", (time.time(), fid))
+        # a player seeking sends many range requests: write at most once a minute per file
+        now = time.time()
+        if now - self._touched.get(fid, 0) < 60:
+            return
+        self._touched[fid] = now
+        self.db.execute("update files set last_access=? where id=?", (now, fid))
         self.db.commit()
 
     def oldest_files(self):
@@ -71,12 +80,19 @@ class Store:
         self.db.commit()
 
 
+_PATHS = re.compile(r"(?<![:\w/\\])(?:[A-Za-z]:)?(?:[\\/][\w.@~+-]+){2,}[\\/]?")
+
+
 def friendly_error(e: Exception) -> str:
-    s = str(e).replace("ERROR: ", "").strip()
+    """An error for the page: no file paths (they show where cookies and data live), no control characters."""
     if tlmod.is_bot_check(e):
         return ("YouTube blocked the server with a bot check. Sign in to YouTube under "
                 "'YouTube cookies' in the sidebar, then press Resume.")
-    return s.split(" Use --cookies")[0][:300]
+    s = str(e).replace("ERROR: ", "").strip() or type(e).__name__
+    s = s.split(" Use --cookies")[0]
+    s = _PATHS.sub("…", s)
+    s = "".join(c if c.isprintable() else " " for c in s)
+    return s[:300]
 
 
 class Manager:
@@ -103,6 +119,9 @@ class Manager:
         self.slsk_error = ""
         self._dirty: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
+        self._inflight: set[tuple[str, int]] = set()      # (job id, track index) being fetched right now
+        self._zip_locks: dict[str, threading.Lock] = {}
+        self._zip_guard = threading.Lock()
         tlmod.use_pot_provider(S.POT_URL)
         self.apply_cookies()
 
@@ -282,9 +301,11 @@ class Manager:
         maybe, complete = await identify_into(tl, job["url"], str(work), S.IDENTIFY, on_audio, on_clips)
         job["found_in"] = tl.found_in
         job["maybe"] = [{"at": h.at, "artist": h.artist, "title": h.title} for h in maybe]
-        # kept on failure or restart, so resuming the job continues the scan instead of starting over
-        shutil.rmtree(work, ignore_errors=True)
-        if not complete:
+        # kept on failure, restart or an early stop, so a later run continues the scan instead of
+        # starting over; the startup sweep removes it once the job can't resume any more
+        if complete:
+            shutil.rmtree(work, ignore_errors=True)
+        else:
             log.warning("job %s: Shazam rate limit, identification stopped early", job["id"])
 
     async def _download_all(self, job, only: Optional[list[dict]] = None):
@@ -320,14 +341,24 @@ class Manager:
                 t["note"] = "making MP3 copy"
             self.mark(job)
 
+        key = (job["id"], t["index"])
+        if key in self._inflight:                 # already on its way: don't fetch it twice
+            return
+        self._inflight.add(key)
         STATUS_CB.set(status)
         tr = Track(t["index"], t["artist"], t["title"], t["start"], t["length"])
         try:
-            r = await self.engine.fetch(tr, self.job_dir(job))
-        except Exception as e:
-            log.exception("track fetch failed")
-            from ..engine import Fetched
-            r = Fetched(None, None, "", f"error: {e}")
+            try:
+                r = await self.engine.fetch(tr, self.job_dir(job))
+            except Exception as e:
+                log.exception("track fetch failed")
+                from ..engine import Fetched
+                r = Fetched(None, None, "", f"error: {friendly_error(e)}")
+        finally:
+            self._inflight.discard(key)
+        if job["id"] not in self.jobs:            # deleted while downloading: don't bring it back
+            shutil.rmtree(S.FILES / job["id"], ignore_errors=True)
+            return
         if r.path:
             fid = uuid.uuid4().hex
             size = os.path.getsize(r.path)
@@ -353,14 +384,26 @@ class Manager:
         if title:
             t["title"] = title.strip()
         t.update(state="pending", note="", file=None, done=0, total=0)
+        self._start_tracks(job, [t])
+
+    def busy(self, job, index: int) -> bool:
+        return (job["id"], index) in self._inflight
+
+    def _start_tracks(self, job, tracks: list[dict]):
         self.mark(job)
-        self._spawn(self._download_all(job, only=[t]) if job["status"] not in ACTIVE_JOB
-                    else self._fetch_track(job, t))
+        if job["status"] in ACTIVE_JOB:
+            for t in tracks:
+                self._spawn(self._fetch_track(job, t))
+        else:
+            job["status"] = "downloading"         # now, not when the task starts: delete/resume see it at once
+            self._spawn(self._download_all(job, only=tracks))
 
     def resume(self, job):
         if job["status"] in ACTIVE_JOB:
             return
         job["error"] = ""
+        job["status"] = "queued" if not job["tracks"] else "downloading"
+        self.mark(job)
         if not job["tracks"]:
             self._spawn(self._run(job))
         else:
@@ -370,9 +413,7 @@ class Manager:
         idx = max((t["index"] for t in job["tracks"]), default=0) + 1
         t = self._track_dict(Track(idx, artist.strip(), title.strip()))
         job["tracks"].append(t)
-        self.mark(job)
-        self._spawn(self._download_all(job, only=[t]) if job["status"] not in ACTIVE_JOB
-                    else self._fetch_track(job, t))
+        self._start_tracks(job, [t])
 
     def delete(self, job):
         self.jobs.pop(job["id"], None)
@@ -386,21 +427,43 @@ class Manager:
 
     # ---------- zip ----------
     def build_zip(self, job) -> str:
+        with self._zip_guard:
+            lock = self._zip_locks.setdefault(job["id"], threading.Lock())
+        with lock:                                # two clicks build it once; the second waits and reuses it
+            return self._build_zip(job)
+
+    def _build_zip(self, job) -> str:
         path = S.ZIPS / f"{job['id']}.zip"
         files = []
-        for t in job["tracks"]:
+        for t in list(job["tracks"]):
             for key in ("file", "mp3"):
                 f = self.store.file(t[key]) if t.get(key) else None
                 if f and os.path.exists(f["path"]):
                     files.append(f["path"])
-        newest = max((os.path.getmtime(p) for p in files), default=0)
+        newest = 0.0
+        for p in files:
+            try:
+                newest = max(newest, os.path.getmtime(p))
+            except OSError:
+                pass
         if not path.exists() or path.stat().st_mtime < newest:
-            tmp = str(path) + ".tmp"
-            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:   # audio is already compressed
-                for p in files:
-                    z.write(p, os.path.basename(p))
-                z.writestr("tracklist.txt", self.tracklist_text(job))
-            os.replace(tmp, path)
+            fd, tmp = tempfile.mkstemp(dir=S.ZIPS, suffix=".tmp")
+            os.close(fd)
+            try:
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:   # audio is already compressed
+                    for p in files:
+                        try:
+                            z.write(p, os.path.basename(p))
+                        except FileNotFoundError:     # the cache cleaner got there first
+                            pass
+                    z.writestr("tracklist.txt", self.tracklist_text(job))
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
         os.utime(path)
         return str(path)
 
@@ -453,8 +516,9 @@ class Manager:
         for fid, job_id, track, path, size, last in self.store.oldest_files():
             if freed >= target:
                 break
-            if now - last < 600:      # never pull a file from under a fresh download/stream
-                continue
+            job = self.jobs.get(job_id)
+            if now - last < 600 or (job and job["status"] in ACTIVE_JOB):
+                continue              # never pull a file from under a fresh download/stream or a running job
             self._delete_file(fid)
             freed += size or 0
             job = self.jobs.get(job_id)

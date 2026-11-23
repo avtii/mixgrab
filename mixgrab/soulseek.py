@@ -80,12 +80,17 @@ class Candidate:
 
 
 def score(c: Candidate, t: Track, cfg) -> Optional[float]:
-    path_tokens = set(norm(c.path).split())
-    base = os.path.splitext(re.split(r"[\\/]", c.path)[-1])[0]
+    parts = re.split(r"[\\/]", c.path)
+    base = os.path.splitext(parts[-1])[0]
     base_tokens = set(norm(base).split())
+    # only the file name and the folders right above it (album, artist) count: a share's root folders
+    # ("Music", "Techno 2019 Collection") shouldn't make an unrelated file look like a match
+    path_tokens = set(norm(" ".join(parts[-3:])).split())
 
     want_title = tokens(t.title) or norm(t.title).split()
     want_artist = tokens(t.artist) or norm(t.artist).split()
+    if not want_title:                    # a title with no letters or digits ("???"): nothing to match on
+        return None
     tf = sum(w in path_tokens for w in want_title) / len(want_title)
     af = sum(w in path_tokens for w in want_artist) / len(want_artist) if want_artist else 1
     # main title words (outside parentheses) must all be present
@@ -152,9 +157,29 @@ def collect(results, t: Track, cfg) -> list[Candidate]:
     return out
 
 
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
 def safe_name(s: str) -> str:
+    """A file/folder name that works on Windows, macOS and Linux. Never empty, never '.'/'..', never a
+    reserved Windows device name; a long name is cut with a short hash of the whole, so two long names
+    that start the same still differ."""
     s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s).strip(" .")
-    return s[:150]
+    if not s:
+        return "_"
+    if s.split(".")[0].upper() in _RESERVED:
+        s = "_" + s
+    if len(s) > 150:
+        import hashlib
+        s = s[:141].rstrip(" .") + "~" + hashlib.sha1(s.encode()).hexdigest()[:8]
+    return s
+
+
+def track_prefix(t: Track) -> str:
+    return f"{t.index:02d} - {safe_name(t.label)}"
+
+
+PARTIAL = (".part", ".tmp", ".ytdl")      # files still being written
 
 
 class Downloader:
@@ -185,8 +210,13 @@ class Downloader:
             log.debug("status callback failed", exc_info=True)
 
     async def __aenter__(self):
-        await self.client.start()
-        await self.client.login()
+        try:
+            await self.client.start()
+            await self.client.login()
+        except BaseException:
+            # __aexit__ never runs for a failed __aenter__: close the listening ports and connections here
+            await _quietly(asyncio.shield(self.client.stop()))
+            raise
         log.info("Logged in to Soulseek as %s", self.settings.credentials.username)
         return self
 
@@ -200,8 +230,10 @@ class Downloader:
             self._status(t.index, "searching", query=q)
             async with self.search_sem:
                 req = await self.client.searches.search(q)
-                await asyncio.sleep(m["search_seconds"])
-                self.client.searches.remove_request(req)
+                try:
+                    await asyncio.sleep(m["search_seconds"])
+                finally:                              # also when cancelled: stop collecting results
+                    self.client.searches.remove_request(req)
             cands = collect(req.results, t, m)
             log.debug("[%02d] search %r -> %d responses, %d usable", t.index, q,
                      len(req.results), len(cands))
@@ -211,9 +243,9 @@ class Downloader:
 
     async def fetch(self, t: Track, out_dir: str) -> tuple[Optional[str], str]:
         """Returns (final_path or None, message)."""
-        prefix = f"{t.index:02d} - {safe_name(t.label)}"
+        prefix = track_prefix(t)
         for f in os.listdir(out_dir):
-            if f.startswith(prefix + ".") and not f.endswith(".part"):
+            if f.startswith(prefix + ".") and not f.endswith(PARTIAL) and ".yt." not in f:
                 return os.path.join(out_dir, f), "already downloaded"
 
         cands = await self.search(t)
@@ -235,8 +267,15 @@ class Downloader:
             log.debug("[%02d] try %d: %s | %s", t.index, attempts, c.describe(), c.path)
             self._status(t.index, "waiting", attempt=attempts, user=c.username, ext=c.ext,
                            total=c.size, candidates=len(cands))
-            async with self.dl_sem:
-                ok, why = await self._download(c, part, m, t.index, attempts)
+            try:
+                async with self.dl_sem:
+                    ok, why = await self._download(c, part, m, t.index, attempts)
+            except asyncio.CancelledError:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                raise
             if ok:
                 os.replace(part, final)
                 return final, c.describe()
@@ -286,12 +325,20 @@ class Downloader:
                     # and states the loop doesn't otherwise expect (paused, unset)
                     return False, f"stalled for {m['stall_timeout']}s"
         finally:
-            if tr.state.VALUE != TransferState.COMPLETE:
-                try:
-                    await self.client.transfers.abort(tr)
-                except Exception:
-                    pass
-            try:
-                await self.client.transfers.remove(tr)
-            except Exception:
-                pass
+            # shielded: when the job is cancelled, the peer still hears that we stopped
+            await _quietly(asyncio.shield(self._drop(tr)))
+
+    async def _drop(self, tr):
+        if tr.state.VALUE != TransferState.COMPLETE:
+            await _quietly(self.client.transfers.abort(tr))
+        await _quietly(self.client.transfers.remove(tr))
+
+
+async def _quietly(aw, timeout: float = 15):
+    """Await cleanup without letting its errors (or a hang) replace the real outcome."""
+    try:
+        await asyncio.wait_for(aw, timeout)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass

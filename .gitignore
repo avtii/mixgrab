@@ -5,3 +5,6 @@ __pycache__/
 build/
 data/
 dist/
+extra.env
+*.pem
+browser/

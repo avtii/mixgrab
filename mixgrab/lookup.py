@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -22,10 +24,50 @@ STOP = {"the", "a", "an", "of", "and", "at", "in", "on", "live", "set", "dj", "m
         "official", "video", "audio", "hd", "4k", "presents", "pres", "b2b", "x", "vs", "with", "by"}
 
 
+GAPS = {"musicbrainz.org": 1.1, "www.mixesdb.com": 0.5}   # seconds between requests to one host
+RETRIES = 3
+_next_at: dict[str, float] = {}
+_pace_lock = threading.Lock()
+
+
+def _pace(host: str):
+    """Keep every request to one host (successful or not) at least GAPS[host] apart."""
+    with _pace_lock:
+        now = time.monotonic()
+        at = max(now, _next_at.get(host, 0.0))
+        _next_at[host] = at + GAPS.get(host, 0.3)
+    if at > now:
+        time.sleep(at - now)
+
+
+def _retry_after(e: urllib.error.HTTPError, attempt: int) -> float:
+    try:
+        return min(float(e.headers.get("Retry-After") or ""), 30.0)
+    except (TypeError, ValueError):
+        return 2.0 * 2 ** attempt
+
+
 def _get(url: str, timeout: int = 15) -> dict:
+    """GET a JSON document, paced per host; 429 / 5xx / network errors are retried with backoff."""
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    host = urllib.parse.urlsplit(url).hostname or ""
+    for attempt in range(RETRIES):
+        _pace(host)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                js = json.loads(r.read().decode("utf-8"))
+            return js if isinstance(js, dict) else {}
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and e.code < 500 or attempt == RETRIES - 1:
+                raise
+            wait = _retry_after(e, attempt)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == RETRIES - 1:
+                raise
+            wait = 2.0 * 2 ** attempt
+        log.debug("%s busy; retrying in %.0fs", host, wait)
+        time.sleep(wait)
+    return {}
 
 
 def _words(s: str) -> set[str]:
@@ -127,7 +169,6 @@ def mixesdb(info: dict) -> Optional[Tracklist]:
                 continue
             if score > best_score:
                 best, best_score = (page, tracks, unknown, vid and vid in wt), score
-            time.sleep(0.3)
         if best and best_score >= 2.0:
             break
     if not best or best_score < 0.5:
@@ -166,11 +207,12 @@ def musicbrainz(info: dict) -> Optional[Tracklist]:
         log.debug("musicbrainz search failed: %s", e)
         return None
     dur = info.get("duration") or 0
+    if not dur:
+        return None                                       # nothing to check a release's length against
     best = None
     for rel in res.get("releases", []):
         if rel.get("score", 0) < 85:
             continue
-        time.sleep(1.1)                                   # MusicBrainz: 1 request / second
         try:
             full = _get(MB + f"release/{rel['id']}?" + urllib.parse.urlencode(
                 {"inc": "recordings+artist-credits", "fmt": "json"}))
@@ -187,13 +229,13 @@ def musicbrainz(info: dict) -> Optional[Tracklist]:
         if len(tracks) < 2:
             continue
         total = sum(t.length or 0 for t in tracks)
-        fit = abs(total - dur) / dur if dur and total else 1.0
+        fit = abs(total - dur) / dur if total else 1.0
         if best is None or fit < best[0]:
             best = (fit, rel, tracks)
-    if not best or (dur and best[0] > 0.25):              # track lengths must roughly add up to the video
+    if not best or best[0] > 0.25:                        # track lengths must roughly add up to the video
         return None
     fit, rel, tracks = best
-    if dur and fit < 0.1:                                 # same running order: assign start times
+    if fit < 0.1 and all(t.length for t in tracks):       # same running order: assign start times
         at = 0
         for t in tracks:
             t.start, at = at, at + (t.length or 0)
@@ -212,8 +254,10 @@ def lookup(info: dict, log_fn=print) -> Optional[Tracklist]:
             tl = None
         if tl:
             found.append(tl)
-            if not tl.looks_incomplete():
-                break
+            if getattr(tl, "verified", False) and not tl.looks_incomplete():
+                break                                     # the page embeds this very video: done
     if not found:
         return None
-    return max(found, key=lambda t: (len(t.tracks), -t.unknown))
+    # a complete list beats a longer one with gaps; then the one tied to this video; then length
+    return max(found, key=lambda t: (not t.looks_incomplete(), bool(getattr(t, "verified", False)),
+                                     len(t.tracks), -t.unknown))

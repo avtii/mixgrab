@@ -1,4 +1,4 @@
-"""Server settings from environment variables (see deploy/.env.example)."""
+"""Server settings from environment variables (the deploy workflow writes them to .env; see README)."""
 from __future__ import annotations
 
 import json

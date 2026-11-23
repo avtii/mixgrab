@@ -50,9 +50,11 @@ class Tracklist:
         return self.duration / len(self.tracks) > max_avg_len
 
 
-TS_RE = re.compile(r"[\[(]?\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b[\])]?")
+# minutes may run past 99 in long mixes ("123:45")
+TS_RE = re.compile(r"[\[(]?\b(?:(\d{1,2}):)?(\d{1,3}):(\d{2})\b[\])]?")
 NUM_RE = re.compile(r"^\s*(?:#|no\.?\s*)?\d{1,3}\s*[.)\]:]\s*|^\s*0\d\s+(?=\S)", re.I)  # bare "01 " only when zero-padded (keeps "50 Cent")
-SEP_RE = re.compile(r"\s+[-–—~|]\s+|\s*[–—]\s*")
+# "A - B", "A – B", and the lopsided "A -B" / "A- B" (never the inside of "Jay-Z")
+SEP_RE = re.compile(r"\s+[-–—~|]\s+|\s*[–—]\s*|\s+-(?=[^\s\d-])|(?<=[^\s-])-\s+")
 LEAD_JUNK_RE = re.compile(r"^[^\w(\[]+", re.UNICODE)
 TRAIL_JUNK_RE = re.compile(r"[\s\-–—|:,.]+$")
 VIDEO_JUNK_RE = re.compile(
@@ -80,7 +82,14 @@ def parse_line(line: str) -> Optional[tuple[str, str, Optional[int]]]:
     m = TS_RE.search(line)
     if m:
         start = _ts_to_sec(*m.groups())
-        line = line[: m.start()] + " " + line[m.end():]
+        a, b = m.span()
+        ts = m.group(0)
+        # drop a bracket only together with its partner: "(Live at 1:23)" mustn't become "(Live at"
+        if ts[0] in "[(" and ts[-1] not in ")]":
+            a += 1
+        if ts[-1] in ")]" and ts[0] not in "[(":
+            b -= 1
+        line = line[:a] + " " + line[b:]
     line = LEAD_JUNK_RE.sub("", line.strip())
     line = NUM_RE.sub("", line)
     line = LEAD_JUNK_RE.sub("", line)
@@ -167,7 +176,8 @@ def use_cookies(file: str | None = None, browser: str | None = None) -> None:
 
 COOKIE_BROWSERS = ("firefox", "edge", "chrome", "brave", "opera", "vivaldi", "chromium", "safari")
 _YT_DOMAINS = ("youtube.com", "google.com")
-_SIGNED_IN = {"SAPISID", "__Secure-3PSID", "__Secure-1PSID", "LOGIN_INFO", "SID"}
+# session cookies only a signed-in account has (SID/LOGIN_INFO can outlive a sign-out)
+_SIGNED_IN = {"SAPISID", "__Secure-3PSID", "__Secure-1PSID"}
 
 
 class _QuietLog:
@@ -178,10 +188,12 @@ class _QuietLog:
 
 
 def export_youtube_cookies(dest, browser: str | None = None, profile: str | None = None,
-                           keyring: str | None = None, require_signed_in: bool = False) -> dict:
+                           keyring: str | None = None, require_signed_in: bool = False,
+                           keep_signed_in: bool = False) -> dict:
     """Read the YouTube/Google cookies from a browser (or a Firefox profile folder) and save them as cookies.txt.
     Without a browser, tries each installed one and keeps the first that is signed in to YouTube.
-    Returns {"browser", "cookies", "signed_in"}; raises RuntimeError with per-browser reasons if none work."""
+    With keep_signed_in, a signed-in cookies file already at dest is never replaced by signed-out cookies.
+    Returns {"browser", "cookies", "signed_in", "kept"}; raises RuntimeError with per-browser reasons if none work."""
     from yt_dlp.cookies import YoutubeDLCookieJar, extract_cookies_from_browser
     tried = []
     import sys
@@ -193,10 +205,10 @@ def export_youtube_cookies(dest, browser: str | None = None, profile: str | None
             why = ("locked - close the browser and try again" if "could not copy" in msg
                    else "encrypted (Chrome's app-bound encryption)" if "decrypt" in msg or "app-bound" in msg or "appbound" in msg
                    else "not installed" if "could not find" in msg or "not found" in msg
-                   else str(e).splitlines()[0][:100])
+                   else (str(e).strip() or type(e).__name__).splitlines()[0][:100])
             tried.append(f"{b}: {why}")
             continue
-        yt = [c for c in jar if any(c.domain.lstrip(".").endswith(d) for d in _YT_DOMAINS)]
+        yt = [c for c in jar if any(c.domain.lstrip(".") == d or c.domain.endswith("." + d) for d in _YT_DOMAINS)]
         signed = any(c.name in _SIGNED_IN for c in yt if "youtube" in c.domain)
         if not yt:
             tried.append(f"{b}: no YouTube cookies")
@@ -205,6 +217,8 @@ def export_youtube_cookies(dest, browser: str | None = None, profile: str | None
             tried.append(f"{b}: has YouTube cookies but is not signed in to YouTube")
             if not browser or require_signed_in:
                 continue
+        if not signed and keep_signed_in and cookies_signed_in(dest):
+            return {"browser": b, "cookies": len(yt), "signed_in": False, "kept": True}
         out = YoutubeDLCookieJar(str(dest))
         for c in yt:
             out.set_cookie(c)
@@ -212,8 +226,21 @@ def export_youtube_cookies(dest, browser: str | None = None, profile: str | None
         os.close(os.open(dest, os.O_CREAT | os.O_WRONLY, 0o600))   # owner-only before any cookie is written
         os.chmod(dest, 0o600)                                       # also if the file was already there
         out.save(ignore_discard=True, ignore_expires=True)
-        return {"browser": b, "cookies": len(yt), "signed_in": signed}
+        return {"browser": b, "cookies": len(yt), "signed_in": signed, "kept": False}
     raise RuntimeError("\n".join(tried) or "no browser found")
+
+
+def cookies_signed_in(path) -> bool:
+    """True when a cookies.txt holds a YouTube sign-in cookie."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 7 and "youtube" in parts[0] and parts[5] in _SIGNED_IN:
+                    return True
+    except OSError:
+        pass
+    return False
 
 
 def is_bot_check(e: BaseException) -> bool:
@@ -264,6 +291,8 @@ def _ydl(extra: dict) -> yt_dlp.YoutubeDL:
 def fetch_tracklist(url: str, log=print, online: bool = True) -> Tracklist:
     with _ydl({"extract_flat": "in_playlist"}) as ydl:
         info = ydl.extract_info(url, download=False)
+    if not info:
+        raise RuntimeError("couldn't read anything from that link")
     tl = None
     if info.get("extractor_key") == "Mixcloud":
         try:
@@ -329,12 +358,14 @@ def _from_youtube(url: str, info: dict, log) -> Tracklist:
     if info.get("_type") == "playlist":
         tracks = []
         for e in info.get("entries") or []:
+            if not isinstance(e, dict):                # deleted/private videos come back as None
+                continue
             p = parse_line(e.get("title") or "")
             if p:
                 tracks.append(Track(len(tracks) + 1, p[0], p[1], None, e.get("duration")))
             elif e.get("title") and (e.get("channel") or e.get("uploader")):
                 # "Title" uploaded by "Artist - Topic" (YouTube Music auto channels) or the artist (SoundCloud sets)
-                ch = re.sub(r"\s*-\s*Topic$", "", e.get("channel") or e["uploader"])
+                ch = re.sub(r"\s*-\s*Topic$", "", e.get("channel") or e.get("uploader") or "")
                 tracks.append(Track(len(tracks) + 1, ch, VIDEO_JUNK_RE.sub("", e["title"]).strip(),
                                     None, e.get("duration")))
         return Tracklist(title, "playlist entries", tracks)
@@ -389,7 +420,7 @@ def _from_youtube(url: str, info: dict, log) -> Tracklist:
                                               "comment_sort": ["top"]}}}) as ydl:
         info = ydl.extract_info(url, download=False)
     best, best_key = None, None
-    for c in info.get("comments") or []:
+    for c in (info or {}).get("comments") or []:
         tr = parse_block(c.get("text") or "")
         if not _good(tr):
             continue
