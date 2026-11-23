@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 
 AUDIO = {".mp3", ".flac", ".wav", ".aiff", ".aif", ".m4a", ".ogg", ".opus", ".wma", ".ape", ".alac"}
@@ -162,16 +163,68 @@ def _mp3_playlist(src: str, dst: str):
         f.write("\n".join(lines) + "\n")
 
 
-def run(p: Plan, dest: str, progress=lambda done_bytes, name: None) -> list[tuple[str, str]]:
-    """Carry out a plan. Returns (file, error) for files that failed; the rest still go."""
+CHUNK = 256 * 1024     # small writes leave gaps on a shared USB controller for the mouse and keyboard
+
+
+def go_easy() -> None:
+    """Give way to everything else on the machine: lowest I/O and CPU priority for this process.
+    A copy at full speed can starve a mouse or keyboard on the same USB controller."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.SetPriorityClass(k.GetCurrentProcess(), 0x00100000)   # PROCESS_MODE_BACKGROUND_BEGIN: low I/O + CPU
+        else:
+            os.nice(10)
+    except (OSError, AttributeError):
+        pass
+
+
+class Pace:
+    """Caps the copy at `mb_s` megabytes a second (None or 0: no cap). No catching up after a pause."""
+
+    def __init__(self, mb_s: float | None):
+        self.rate = (mb_s or 0) * 1e6
+        self.next = time.monotonic()
+
+    def wrote(self, n: int) -> None:
+        if not self.rate:
+            return
+        now = time.monotonic()
+        self.next = max(self.next, now) + n / self.rate
+        if self.next > now:
+            time.sleep(self.next - now)
+
+
+def _copy(src: str, dst: str, pace: Pace, tick) -> None:
+    """shutil.copy2 in small, paced chunks (times and permissions kept, so the next sync sees it unchanged)."""
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        while chunk := fi.read(CHUNK):
+            fo.write(chunk)
+            tick(len(chunk))
+            pace.wrote(len(chunk))
+    shutil.copystat(src, dst)
+
+
+def run(p: Plan, dest: str, progress=lambda done_bytes, name: None, speed: float | None = None) -> list[tuple[str, str]]:
+    """Carry out a plan, at most `speed` MB/s if given. Returns (file, error) for files that failed;
+    the rest still go."""
     errors = []
     done = 0
+    pace = Pace(speed)
     for src, dst, size in p.copy:
-        progress(done, os.path.basename(src))
+        name = os.path.basename(src)
+        progress(done, name)
         tmp = dst + ".part"
+        got = 0
+
+        def tick(n, base=done):
+            nonlocal got
+            got += n
+            progress(base + min(got, size), name)
         try:
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, tmp)                  # a pulled stick leaves a .part, never a cut-off song
+            _copy(src, tmp, pace, tick)             # a pulled stick leaves a .part, never a cut-off song
             os.replace(tmp, dst)
             p.copied += 1
         except OSError as e:
