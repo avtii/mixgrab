@@ -1,6 +1,6 @@
 [project]
 name = "mixgrab"
-version = "0.3.1"
+version = "0.3.2"
 description = "YouTube DJ mix/album/playlist -> tracklist (YouTube, MixesDB, MusicBrainz or audio ID) -> Soulseek downloads, YouTube fallback, MP3 copies"
 requires-python = ">=3.11"
 dependencies = ["yt-dlp", "aioslsk>=1.7", "shazamio", "rich", "aiohttp"]
