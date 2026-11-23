@@ -177,7 +177,13 @@ MIXGRAB_PASSWORD='a-long-password' mixgrab-web      # http://localhost:8080
 
 The web app and the CLI share `mixgrab/engine.py`. Soulseek allows one session per account, so the web app keeps a single Soulseek connection and runs every job through it.
 
-YouTube bot-checks servers in data centers. The Docker deploy handles this without cookies: it runs a small [bgutil PO-token provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) container (`mixgrab-pot`), and yt-dlp uses it to prove each request comes from a real player. YouTube still blocks most datacenter IPs outright, so in practice the server needs cookies. Click **Add YouTube cookies** in the sidebar. The dialog shows where the files are on your computer and takes any of these:
+YouTube bot-checks servers in data centers. The Docker deploy handles this without cookies: it runs a small [bgutil PO-token provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) container (`mixgrab-pot`), and yt-dlp uses it to prove each request comes from a real player. YouTube still blocks most datacenter IPs outright, so in practice the server needs cookies. Click **Add YouTube cookies** in the sidebar, then:
+1. Click **Open YouTube sign-in**. A Chromium running on the server (`mixgrab-browser`, [linuxserver/chromium](https://docs.linuxserver.io/images/docker-chromium/)) opens in a new tab at `/yt-login/`, and you sign in to YouTube there. Caddy only lets the signed-in owner reach it.
+2. Click **I'm signed in, use it**. mixgrab reads the YouTube cookies from that browser's profile, and re-reads them every 6 hours while the browser stays signed in.
+
+Use a spare Google account: YouTube can flag accounts that are used for downloading.
+
+Or upload a file instead. The same dialog shows where the files are on your computer and takes any of these:
 - Firefox's `cookies.sqlite` as is. Only the YouTube and Google cookies are kept, and the rest of the file is discarded.
 - The file from `mixgrab --export-cookies`.
 - Any `cookies.txt`.
@@ -196,6 +202,8 @@ Then press **Resume** on the failed job.
 | `CONVERT_MP3` / `MP3_BITRATE` | 1 / 320 | MP3 copies |
 | `YOUTUBE_FALLBACK` / `YOUTUBE_QUALITY` | 1 / 0 | YouTube fallback |
 | `POT_URL` | (none; `http://mixgrab-pot:4416` in the compose file) | bgutil PO-token provider, so YouTube needs no cookies |
+| `BROWSER_PROFILE` | (none; `/browser/Default` in the compose file) | the sign-in browser's Chromium profile, mounted read-only |
+| `LOGIN_PATH` | `/yt-login/` | where the reverse proxy serves the sign-in browser |
 | `YTDLP_COOKIES` | (none) | fixed cookies.txt path, instead of uploading one |
 | `AUDD_TOKEN`, `ACR_HOST`, `ACR_ACCESS_KEY`, `ACR_ACCESS_SECRET` | (none) | extra audio recognizers |
 
