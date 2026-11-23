@@ -199,3 +199,15 @@ a.fmt:hover { color: var(--ink); border-color: var(--ink2); }
 .tr .name b .t { display: block; color: var(--ink); font-size: 14px; }
 button.ytc { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; text-align: left; }
 button.ytc:hover span:last-child { color: var(--ink); text-decoration: underline; }
+.dlg { width: min(560px, calc(100vw - 32px)); border: 1px solid var(--line2); border-radius: var(--radius); padding: 22px 24px;
+  background: var(--panel); color: var(--ink); box-shadow: 0 12px 40px rgba(0,0,0,.18); }
+.dlg::backdrop { background: rgba(0,0,0,.35); }
+.dlg h3 { margin: 0 0 6px; font-size: 17px; }
+.dlg p { margin: 0 0 12px; line-height: 1.45; }
+.dlg-x { position: absolute; top: 14px; right: 18px; }
+.dlg-steps { margin: 0 0 12px; padding-left: 20px; display: grid; gap: 12px; line-height: 1.45; }
+.dlg-path { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+.dlg-path code { flex: 1 1 220px; overflow-wrap: anywhere; }
+.dlg code { background: var(--hover); border-radius: 6px; padding: 2px 6px; font-size: 12.5px; }
+.dlg .small { font-size: 12.5px; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }

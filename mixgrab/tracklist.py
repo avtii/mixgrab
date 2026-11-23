@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import yt_dlp
@@ -148,6 +149,54 @@ def use_cookies(file: str | None = None, browser: str | None = None) -> None:
         YDL_EXTRA["cookiefile"] = file
     elif browser:
         YDL_EXTRA["cookiesfrombrowser"] = (browser,)
+
+
+COOKIE_BROWSERS = ("firefox", "edge", "chrome", "brave", "opera", "vivaldi", "chromium", "safari")
+_YT_DOMAINS = ("youtube.com", "google.com")
+_SIGNED_IN = {"SAPISID", "__Secure-3PSID", "__Secure-1PSID", "LOGIN_INFO", "SID"}
+
+
+class _QuietLog:
+    def debug(self, m): pass
+    def info(self, m): pass
+    def warning(self, m, **k): pass
+    def error(self, m): pass
+
+
+def export_youtube_cookies(dest, browser: str | None = None, profile: str | None = None) -> dict:
+    """Read the YouTube/Google cookies from a browser (or a Firefox profile folder) and save them as cookies.txt.
+    Without a browser, tries each installed one and keeps the first that is signed in to YouTube.
+    Returns {"browser", "cookies", "signed_in"}; raises RuntimeError with per-browser reasons if none work."""
+    from yt_dlp.cookies import YoutubeDLCookieJar, extract_cookies_from_browser
+    tried = []
+    import sys
+    for b in ([browser] if browser else [x for x in COOKIE_BROWSERS if x != "safari" or sys.platform == "darwin"]):
+        try:
+            jar = extract_cookies_from_browser(b, profile, logger=_QuietLog())
+        except Exception as e:
+            msg = str(e).lower()
+            why = ("locked - close the browser and try again" if "could not copy" in msg
+                   else "encrypted (Chrome's app-bound encryption)" if "decrypt" in msg or "app-bound" in msg or "appbound" in msg
+                   else "not installed" if "could not find" in msg or "not found" in msg
+                   else str(e).splitlines()[0][:100])
+            tried.append(f"{b}: {why}")
+            continue
+        yt = [c for c in jar if any(c.domain.lstrip(".").endswith(d) for d in _YT_DOMAINS)]
+        signed = any(c.name in _SIGNED_IN for c in yt if "youtube" in c.domain)
+        if not yt:
+            tried.append(f"{b}: no YouTube cookies")
+            continue
+        if not signed:
+            tried.append(f"{b}: has YouTube cookies but is not signed in to YouTube")
+            if not browser:
+                continue
+        out = YoutubeDLCookieJar(str(dest))
+        for c in yt:
+            out.set_cookie(c)
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        out.save(ignore_discard=True, ignore_expires=True)
+        return {"browser": b, "cookies": len(yt), "signed_in": signed}
+    raise RuntimeError("\n".join(tried) or "no browser found")
 
 
 def is_bot_check(e: BaseException) -> bool:

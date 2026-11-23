@@ -85,10 +85,22 @@ If you run the same URL again, mixgrab skips the tracks it already has.
 ### If YouTube asks you to sign in
 Sometimes YouTube refuses with "Sign in to confirm you're not a bot". This mostly happens on VPNs and servers. Give mixgrab your YouTube cookies once:
 ```
-mixgrab --cookies cookies.txt URL                # saved to ~/.mixgrab/youtube-cookies.txt and reused
-mixgrab --cookies-from-browser firefox URL       # or read them live from a browser
+mixgrab --export-cookies                         # finds them in your browsers, saves ~/.mixgrab/youtube-cookies.txt
+mixgrab --export-cookies firefox                 # or from one browser
+mixgrab --cookies cookies.txt URL                # or a cookies.txt you exported (saved and reused)
+mixgrab --cookies-from-browser firefox URL       # or read them live from a browser on every run
 ```
-To make `cookies.txt`:
+`--export-cookies` works best with Firefox: sign in to youtube.com there and close Firefox first. Chrome and Edge lock their cookie file while open, and recent Chrome encrypts it so other programs can't read it.
+
+Where browsers keep cookies (mixgrab reads these for you):
+
+| Browser | Windows | macOS |
+|---|---|---|
+| Firefox | `%APPDATA%\Mozilla\Firefox\Profiles\<profile>\cookies.sqlite` | `~/Library/Application Support/Firefox/Profiles/<profile>/cookies.sqlite` |
+| Chrome | `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Network\Cookies` (encrypted) | `~/Library/Application Support/Google/Chrome/Default/Cookies` (encrypted) |
+| Edge | `%LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Network\Cookies` (encrypted) | `~/Library/Application Support/Microsoft Edge/Default/Cookies` (encrypted) |
+
+To make a `cookies.txt` by hand instead:
 1. Sign in to youtube.com in a private window.
 2. Export the cookies with a "cookies.txt" browser extension, such as *Get cookies.txt LOCALLY*.
 3. Close the private window.
@@ -165,7 +177,12 @@ MIXGRAB_PASSWORD='a-long-password' mixgrab-web      # http://localhost:8080
 
 The web app and the CLI share `mixgrab/engine.py`. Soulseek allows one session per account, so the web app keeps a single Soulseek connection and runs every job through it.
 
-YouTube bot-checks servers in data centers. The Docker deploy handles this without cookies: it runs a small [bgutil PO-token provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) container (`mixgrab-pot`), and yt-dlp uses it to prove each request comes from a real player. If YouTube still asks for a sign-in, use **Add YouTube cookies** in the sidebar to upload a `cookies.txt`, then press **Resume** on the failed job.
+YouTube bot-checks servers in data centers. The Docker deploy handles this without cookies: it runs a small [bgutil PO-token provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) container (`mixgrab-pot`), and yt-dlp uses it to prove each request comes from a real player. YouTube still blocks most datacenter IPs outright, so in practice the server needs cookies. Click **Add YouTube cookies** in the sidebar. The dialog shows where the files are on your computer and takes any of these:
+- Firefox's `cookies.sqlite` as is. Only the YouTube and Google cookies are kept, and the rest of the file is discarded.
+- The file from `mixgrab --export-cookies`.
+- Any `cookies.txt`.
+
+Then press **Resume** on the failed job.
 
 | Variable | Default | Meaning |
 |---|---|---|

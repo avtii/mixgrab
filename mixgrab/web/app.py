@@ -1,6 +1,7 @@
 """mixgrab web: a private, single-owner web UI over the mixgrab pipeline."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -8,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import tempfile
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -19,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .. import tracklist as tlmod
 from . import settings as S
 from .jobs import ACTIVE_JOB, Manager
 
@@ -150,6 +153,8 @@ async def me():
 @app.post("/api/youtube-cookies", dependencies=[Depends(require_owner)])
 async def upload_cookies(request: Request):
     raw = await request.body()
+    if raw.startswith(b"SQLite format 3\x00"):     # Firefox's own cookies.sqlite, uploaded as is
+        return await asyncio.to_thread(_cookies_from_firefox_db, raw)
     if len(raw) > 1_000_000:
         raise HTTPException(413, "That file is too big for a cookies.txt.")
     text = raw.decode("utf-8", "replace")
@@ -168,6 +173,25 @@ async def upload_cookies(request: Request):
     os.replace(tmp, S.COOKIES_FILE)
     mgr.apply_cookies()
     return {"ok": True, "cookies": len(yt)}
+
+
+def _cookies_from_firefox_db(raw: bytes) -> dict:
+    """Keep only the YouTube/Google cookies from an uploaded Firefox cookies.sqlite; the database itself is discarded."""
+    if len(raw) > 64_000_000:
+        raise HTTPException(413, "That cookies.sqlite is too big.")
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "cookies.sqlite").write_bytes(raw)
+        try:
+            r = tlmod.export_youtube_cookies(S.COOKIES_FILE, "firefox", profile=d)
+        except RuntimeError:
+            raise HTTPException(400, "No YouTube cookies in that file. Sign in to youtube.com in Firefox, "
+                                     "close Firefox, then upload cookies.sqlite again.")
+    os.chmod(S.COOKIES_FILE, 0o600)
+    mgr.apply_cookies()
+    if not r["signed_in"]:
+        return {"ok": True, "cookies": r["cookies"],
+                "warning": "Firefox isn't signed in to YouTube, so these cookies may not get past the bot check."}
+    return {"ok": True, "cookies": r["cookies"]}
 
 
 @app.delete("/api/youtube-cookies", dependencies=[Depends(require_owner)])

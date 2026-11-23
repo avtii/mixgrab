@@ -33,8 +33,8 @@
     <nav id="history" class="history"></nav>
     <div class="side-foot">
       <div id="slsk" class="status-line"><span class="dot"></span><span>Soulseek</span></div>
-      <button id="ytc" class="status-line ytc" title="Upload a cookies.txt exported from a browser signed in to YouTube"><span class="dot"></span><span>YouTube cookies</span></button>
-      <input id="ytc-file" type="file" accept=".txt,text/plain" class="hidden">
+      <button id="ytc" class="status-line ytc" title="YouTube cookies: where to find them, upload or remove"><span class="dot"></span><span>YouTube cookies</span></button>
+      <input id="ytc-file" type="file" accept=".txt,.sqlite,text/plain" class="hidden">
       <div id="cache" class="cache"><div class="cache-bar"><i></i></div><span></span></div>
       <button id="logout" class="btn link">Sign out</button>
     </div>
@@ -108,6 +108,23 @@
   <button id="pl-close" class="btn link" aria-label="Close player">✕</button>
 </div>
 
+<dialog id="ytc-dlg" class="dlg">
+  <form method="dialog" class="dlg-x"><button class="btn link" aria-label="Close">✕</button></form>
+  <h3>YouTube cookies</h3>
+  <p class="muted">YouTube blocks servers unless they send the cookies of a signed-in browser. Pick one way:</p>
+  <ol class="dlg-steps">
+    <li><b>Firefox (easiest).</b> Sign in to youtube.com in Firefox, then <b>close Firefox</b>. Upload this file from your Firefox profile folder:
+      <div class="dlg-path"><code id="ytc-ffpath"></code><button id="ytc-copy" class="btn ghost" type="button">Copy folder</button></div>
+      <span class="muted small">In the file dialog, paste the folder into the address bar, open your profile folder (<code>xxxxxxxx.default-release</code>) and choose <code>cookies.sqlite</code>. Only the YouTube cookies are kept; the rest of the file is discarded.</span></li>
+    <li><b>mixgrab app on your computer.</b> Run <code>mixgrab --export-cookies</code>, then upload the file it prints, <code id="ytc-clipath"></code>.</li>
+    <li><b>Any browser.</b> Export <code>cookies.txt</code> with an extension such as <i>Get cookies.txt LOCALLY</i> and upload it.</li>
+  </ol>
+  <p class="muted small">Chrome and Edge encrypt their cookie file, so it can't be uploaded directly. Use option 2 or 3 for them.</p>
+  <div class="dlg-actions">
+    <button id="ytc-del" class="btn ghost danger hidden" type="button">Remove cookies</button>
+    <button id="ytc-pick" class="btn primary" type="button">Choose file…</button>
+  </div>
+</dialog>
 <div id="toast" class="toast"></div>
 <script src="/static/app.js"></script>
 </body>

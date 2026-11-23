@@ -21,6 +21,7 @@ COOKIES_PATH = CONFIG_DIR / "youtube-cookies.txt"
 
 BOT_HELP = f"""[red]YouTube asked mixgrab to sign in ("confirm you're not a bot").[/]
 Give it your YouTube cookies, once:
+  [bold]mixgrab --export-cookies[/]   finds them in your browsers (Firefox works best) and saves them
   [bold]mixgrab --cookies cookies.txt URL[/]   cookies.txt exported from a browser signed in to youtube.com
                                        (saved to {COOKIES_PATH}, used automatically from then on)
   [bold]mixgrab --cookies-from-browser firefox URL[/]   read them live from Firefox/Safari/Edge/Chrome"""
@@ -102,6 +103,26 @@ def setup_cookies(cfg: dict, args) -> None:
         use_cookies(browser=browser)
     elif file:
         use_cookies(file=os.path.expanduser(file))
+
+
+def export_cookies(browser: str | None) -> int:
+    """--export-cookies: find signed-in YouTube cookies in a browser and save them as cookies.txt."""
+    from .tracklist import export_youtube_cookies
+    print(f"Looking for YouTube cookies in {browser or 'your browsers'}…")
+    try:
+        r = export_youtube_cookies(COOKIES_PATH, browser)
+    except RuntimeError as e:
+        print("No usable YouTube cookies found:")
+        print("\n".join("  " + line for line in str(e).splitlines()))
+        print("\nSign in to youtube.com in Firefox (its cookies can always be read), close it, then run this again.\n"
+              "Chrome and Edge lock their cookies while open, and newer Chrome encrypts them for itself only.")
+        return 1
+    print(f"Found {r['cookies']} YouTube cookies in {r['browser']}"
+          + ("" if r["signed_in"] else " (not signed in to YouTube, so they may not help)"))
+    print(f"Saved to: {COOKIES_PATH}")
+    print("mixgrab uses this file automatically. For the web app, upload this file with "
+          "'Add YouTube cookies' in the sidebar.")
+    return 0
 
 
 def check() -> int:
@@ -265,9 +286,14 @@ def main() -> None:
     p.add_argument("--no-youtube", action="store_true", help="don't fall back to YouTube for tracks Soulseek lacks")
     p.add_argument("--no-mp3", action="store_true", help="don't make MP3 copies of lossless downloads")
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--export-cookies", nargs="?", const="auto", metavar="BROWSER",
+                   help="find your YouTube cookies in a browser (all of them, or the one named), save them to "
+                        f"{COOKIES_PATH} for mixgrab and for uploading to the web app, then exit")
     args = p.parse_args()
     if args.check:
         sys.exit(check())
+    if args.export_cookies:
+        sys.exit(export_cookies(None if args.export_cookies == "auto" else args.export_cookies))
     if not args.url:
         p.print_help()
         sys.exit(1)

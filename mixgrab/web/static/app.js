@@ -101,20 +101,38 @@ async function refreshMe() {
     $("#ytc .dot").className = "dot " + (yc ? "ok" : "warn");
     $("#ytc span:last-child").textContent = yc
       ? `YouTube cookies · ${new Date(yc * 1000).toLocaleDateString()}` : "Add YouTube cookies";
+    $("#ytc-del").classList.toggle("hidden", !yc);
   } catch {}
 }
 
-$("#ytc").addEventListener("click", () => $("#ytc-file").click());
+// where the cookies live on the viewer's own computer
+const ua = navigator.userAgent;
+const OS = /Windows/.test(ua) ? "win" : /Mac OS X|Macintosh/.test(ua) ? "mac" : "linux";
+const FF_DIR = { win: "%APPDATA%\\Mozilla\\Firefox\\Profiles", mac: "~/Library/Application Support/Firefox/Profiles",
+                 linux: "~/.mozilla/firefox" }[OS];
+$("#ytc-ffpath").textContent = FF_DIR;
+$("#ytc-clipath").textContent = OS === "win" ? "%USERPROFILE%\\.mixgrab\\youtube-cookies.txt" : "~/.mixgrab/youtube-cookies.txt";
+$("#ytc-copy").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(FF_DIR); toast("Folder copied. Paste it into the file dialog's address bar."); }
+  catch { toast(FF_DIR); }
+});
+$("#ytc").addEventListener("click", () => $("#ytc-dlg").showModal());
+$("#ytc-pick").addEventListener("click", () => $("#ytc-file").click());
+$("#ytc-del").addEventListener("click", async () => {
+  try { await api("/api/youtube-cookies", { method: "DELETE" }); toast("YouTube cookies removed."); refreshMe(); }
+  catch (err) { toast(err.message); }
+});
 $("#ytc-file").addEventListener("change", async (e) => {
   const f = e.target.files[0];
   e.target.value = "";
   if (!f) return;
   try {
-    const r = await fetch("/api/youtube-cookies", { method: "POST", body: await f.text(),
-      headers: { "Content-Type": "text/plain" }, credentials: "same-origin" });
+    const r = await fetch("/api/youtube-cookies", { method: "POST", body: f,
+      headers: { "Content-Type": "application/octet-stream" }, credentials: "same-origin" });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
-    toast(`YouTube cookies saved (${d.cookies}). Press Resume on failed jobs.`);
+    $("#ytc-dlg").close();
+    toast(d.warning || `YouTube cookies saved (${d.cookies}). Press Resume on failed jobs.`);
     refreshMe();
   } catch (err) { toast(err.message); }
 });
