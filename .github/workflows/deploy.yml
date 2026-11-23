@@ -41,6 +41,7 @@ jobs:
           # public repo: don't publish the build record (it embeds the push event, incl. the pusher's email)
           DOCKER_BUILD_RECORD_UPLOAD: "false"
           DOCKER_BUILD_SUMMARY: "false"
+          BUILDX_METADATA_PROVENANCE: disabled
         with:
           context: .
           platforms: linux/amd64
