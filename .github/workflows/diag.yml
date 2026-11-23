@@ -21,13 +21,23 @@ jobs:
           key: ${{ secrets.DEPLOY_KEY }}
           passphrase: ${{ secrets.DEPLOY_PASSPHRASE }}
           envs: VIDEO
+          command_timeout: 10m
           script: |
-            docker ps --filter name=mixgrab --format '{{.Names}} {{.Status}}'
-            docker exec mixgrab pip show bgutil-ytdlp-pot-provider yt-dlp 2>/dev/null | grep -E '^(Name|Version)'
-            docker exec mixgrab python -c "import urllib.request;print(urllib.request.urlopen('http://mixgrab-pot:4416/ping',timeout=5).read()[:200])" || true
-            # verbose yt-dlp, filtered to the lines about plugins, PO tokens and errors
-            docker exec mixgrab yt-dlp -v --simulate --no-cache-dir \
-              --extractor-args "youtubepot-bgutilhttp:base_url=http://mixgrab-pot:4416" \
-              --extractor-args "youtube:player_client=mweb,web_safari,web_embedded;fetch_pot=always" \
-              "https://www.youtube.com/watch?v=$VIDEO" 2>&1 \
-              | grep -E 'youtube|ERROR|WARNING' | cut -c1-220 | head -80 || true
+            U="https://www.youtube.com/watch?v=$VIDEO"
+            POT="youtubepot-bgutilhttp:base_url=http://mixgrab-pot:4416"
+            try() {  # $1 = label, rest = extra yt-dlp args; prints OK + title or the error
+              out=$(docker exec mixgrab yt-dlp --simulate --no-cache-dir --print title --extractor-args "$POT" "${@:2}" "$U" 2>&1 | tail -2)
+              case "$out" in *ERROR*) echo "$1: FAIL $(echo "$out" | grep ERROR | cut -c1-120)";; *) echo "$1: OK $out";; esac
+            }
+            try "plain"
+            echo "host IPv6 routes: $(ip -6 route show default | head -1)"
+            try "ipv6" -6
+            # Cloudflare WARP as a SOCKS5 egress (temporary test container, removed below)
+            docker rm -f warp-test >/dev/null 2>&1 || true
+            docker run -d --name warp-test --network burrball_default --cap-add NET_ADMIN \
+              --sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+              -e WARP_SLEEP=2 caomingjun/warp:latest >/dev/null
+            for i in $(seq 1 30); do docker exec mixgrab python -c "import socket;socket.create_connection(('warp-test',1080),2)" 2>/dev/null && break; sleep 3; done
+            sleep 10
+            try "warp" --proxy socks5://warp-test:1080
+            docker rm -f warp-test >/dev/null
