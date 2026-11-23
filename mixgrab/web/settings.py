@@ -69,7 +69,7 @@ MATCH = {
 CONVERT = {"mp3": _env("CONVERT_MP3", "1") == "1", "bitrate": _env("MP3_BITRATE", 320, int)}
 YOUTUBE = {"fallback": _env("YOUTUBE_FALLBACK", "1") == "1", "quality": _env("YOUTUBE_QUALITY", "0")}
 SOUNDCLOUD = {"fallback": _env("SOUNDCLOUD_FALLBACK", "1") == "1"}
-IDENTIFY = {"auto": True, "step": 45, "min_hits": 2, "max_avg_track_len": 600,
+IDENTIFY = {"auto": True, "step": 90, "min_hits": 2, "max_avg_track_len": 600,
             "audd_token": _env("AUDD_TOKEN"),
             "acrcloud": {"host": _env("ACR_HOST"), "access_key": _env("ACR_ACCESS_KEY"),
                          "access_secret": _env("ACR_ACCESS_SECRET")}}

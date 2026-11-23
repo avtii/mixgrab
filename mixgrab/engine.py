@@ -175,11 +175,13 @@ def identify_reason(tl, mode: str, ic: dict) -> Optional[str]:
 
 async def identify_into(tl, url: str, work: str, ic: dict,
                         on_audio=lambda done, total: None,
-                        on_clips=lambda done, total, matches: None) -> list:
+                        on_clips=lambda done, total, matches, wait=0: None) -> tuple[list, bool]:
     """Download the mix audio, fingerprint it and merge confident matches into tl.tracks.
-    Returns the low-confidence (heard once) hits."""
+    Answers are kept in `work`, so running again after an interruption resumes the scan.
+    Returns (low-confidence hits heard only once, complete). complete is False when Shazam kept
+    rate-limiting and the scan stopped early; running again continues it."""
     import json
-    from .identify import download_audio, hits_to_tracks, merge, recognizers, scan
+    from .identify import download_audio, hits_to_tracks, listed_spans, merge, recognizers, scan
     audio = await asyncio.to_thread(download_audio, url, work, on_audio)
     duration = tl.duration
     if not duration:
@@ -192,14 +194,15 @@ async def identify_into(tl, url: str, work: str, ic: dict,
             duration = int(float(r.stdout.strip()))
         except ValueError:
             duration = 0
-    hits = await scan(audio, duration, ic.get("step", 45), progress=on_clips, fallbacks=recognizers(ic))
+    hits, complete = await scan(audio, duration, ic.get("step", 90), progress=on_clips, fallbacks=recognizers(ic),
+                      cache=os.path.join(work, "clips.json"), skip=listed_spans(tl.tracks))
     with open(os.path.join(work, "hits.json"), "w", encoding="utf-8") as f:
         json.dump([h.__dict__ for h in hits], f, indent=1, ensure_ascii=False)
     found, maybe = hits_to_tracks(hits, ic.get("min_hits", 2), duration)
     before = len(tl.tracks)
     tl.tracks = merge(tl.tracks, found)
-    tl.found_in += f" + audio ID ({len(tl.tracks) - before} added)"
-    return maybe
+    tl.found_in += f" + audio ID ({len(tl.tracks) - before} added{'' if complete else ', stopped early'})"
+    return maybe, complete
 
 
 def to_mp3(ffmpeg: str, src: str, bitrate: int = 320) -> str:
