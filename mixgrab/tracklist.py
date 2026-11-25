@@ -55,6 +55,7 @@ class Tracklist:
 
 # minutes may run past 99 in long mixes ("123:45")
 TS_RE = re.compile(r"[\[(]?\b(?:(\d{1,2}):)?(\d{1,3}):(\d{2})\b[\])]?")
+RANGE_END_RE = re.compile(r"\s*(?:[-–—~]|to)\s*[\[(]?(?:\d{1,2}:)?\d{1,3}:\d{2}\b[\])]?(?=\s*[-–—~|:]?\s*\S)", re.I)
 NUM_RE = re.compile(r"^\s*(?:#|no\.?\s*)?\d{1,3}\s*[.)\]:]\s*|^\s*0\d\s+(?=\S)", re.I)  # bare "01 " only when zero-padded (keeps "50 Cent")
 # "A - B", "A – B", and the lopsided "A -B" / "A- B" (never the inside of "Jay-Z")
 SEP_RE = re.compile(r"\s+[-–—~|]\s+|\s*[–—]\s*|\s+-(?=[^\s\d-])|(?<=[^\s-])-\s+")
@@ -92,7 +93,14 @@ def parse_line(line: str) -> Optional[tuple[str, str, Optional[int]]]:
             a += 1
         if ts[-1] in ")]" and ts[0] not in "[(":
             b -= 1
-        line = line[:a] + " " + line[b:]
+        rest = line[b:]
+        # a time range "58:19 - 1:01:45 - Artist - Title": the end time goes too
+        end = RANGE_END_RE.match(rest)
+        if end:
+            rest = rest[end.end():]
+            if ts[0] in "[(" and end.group(0)[-1] in ")]":     # "[1:02:03 - 1:05:00]"
+                a = m.start()
+        line = line[:a] + " " + rest
     line = LEAD_JUNK_RE.sub("", line.strip())
     line = NUM_RE.sub("", line)
     line = LEAD_JUNK_RE.sub("", line)
