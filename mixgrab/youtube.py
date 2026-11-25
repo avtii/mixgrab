@@ -21,6 +21,15 @@ SHORT_RE = re.compile(r"\b(clip|snippet|teaser|preview|trailer|sample)\b", re.I)
 MASHUP_RE = re.compile(r"\s(x|vs\.?|mashup)\s|\bmash-?up\b", re.I)
 
 
+class _YdlLog:
+    """yt-dlp prints ERROR lines to the console even with quiet=True, over the progress display.
+    Its errors also come back as exceptions, which become the track's status, so here they only go to -v."""
+    def debug(self, m): pass
+    def info(self, m): pass
+    def warning(self, m, **k): log.debug("yt-dlp: %s", m)
+    def error(self, m): log.debug("yt-dlp: %s", m)
+
+
 @dataclass(frozen=True)
 class Site:
     key: str        # config section and Fetched.source
@@ -84,7 +93,8 @@ def _score(e: dict, t: Track, site: Site = SITES["youtube"]) -> Optional[float]:
 def find(t: Track, results: int = 8, site: str = "youtube") -> Optional[dict]:
     st = SITES[site]
     q = f"{st.search}{results}:{t.artist} - {t.title}"
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "extract_flat": True}
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "extract_flat": True,
+            "logger": _YdlLog(), "socket_timeout": 30}
     opts.update(ydl_extra())
     with yt_dlp.YoutubeDL(opts) as y:
         info = y.extract_info(q, download=False)
@@ -116,7 +126,7 @@ def download(entry: dict, dest_noext: str, ffmpeg: str, quality: str = "0",
     """Download the best audio and convert it to MP3 at dest_noext + '.mp3'. Returns that path."""
     url = entry.get("url") or f"https://www.youtube.com/watch?v={entry['id']}"
     tmpl = dest_noext + ".yt.%(ext)s"
-    opts = {"quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True,
+    opts = {"quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True, "logger": _YdlLog(),
             "format": _no_previews if site == "soundcloud" else "bestaudio/best",
             "outtmpl": tmpl, "ffmpeg_location": os.path.dirname(ffmpeg),
             "retries": 10, "fragment_retries": 10, "socket_timeout": 30, "continuedl": True,
