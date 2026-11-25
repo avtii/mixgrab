@@ -236,11 +236,13 @@ async def run(args) -> int:
     ic = cfg["identify"]
     mode = "always" if args.identify else "never" if (args.no_identify or not ic.get("auto", True)) else "auto"
     why = None if args.tracklist else identify_reason(tl, mode, ic)
-    id_complete = True
-    if why:
-        console.print(f"[yellow]Identifying songs from the audio[/] [dim]({esc(why)})[/]")
-        with IdentifyProgress() as ip:
-            maybe, id_complete = await identify_into(tl, args.url, work, ic, ip.on_audio, ip.on_clips)
+    # download each song while the rest of the mix is still being identified; not for a dry run, nor
+    # with --only (its numbers are the final ones, known only once identification is over)
+    early = bool(why) and not args.dry_run and not keep
+    id_complete, maybe = True, []
+    no_tracks = "[red]No tracks found.[/] Pass --tracklist FILE with 'Artist - Title' lines, or try --identify."
+
+    def identify_notes():
         if not id_complete:
             console.print("[yellow]Shazam kept rate-limiting, so identification stopped early.[/] "
                           "Run the same command again later: it carries on from where it stopped.")
@@ -250,29 +252,42 @@ async def run(args) -> int:
                 console.print(f"[dim]  ~{fmt_ts(h.at)}  {esc(h.artist)} – {esc(h.title)}[/]")
         console.print()
 
-    tracklist_table(tl)
-    if args.dry_run:
-        if why and id_complete and not args.keep_audio:
-            shutil.rmtree(work, ignore_errors=True)
-        if not tl.tracks:
-            console.print("[red]No tracks found.[/] Pass --tracklist FILE with 'Artist - Title' lines, or try --identify.")
-            return 1
-        return 0
-    with open(os.path.join(out_dir, "tracklist.txt"), "w", encoding="utf-8") as f:
-        f.write(f"{tl.source_title}\n{args.url}\nsource: {tl.found_in}\n\n")
-        f.writelines(f"{t.index:02d}. {t.label}\n" for t in tl.tracks)
+    def write_tracklist():
+        with open(os.path.join(out_dir, "tracklist.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{tl.source_title}\n{args.url}\nsource: {tl.found_in}\n\n")
+            f.writelines(f"{t.index:02d}. {t.label}\n" for t in tl.tracks)
 
-    if not tl.tracks:
-        console.print("[red]No tracks found.[/] Pass --tracklist FILE with 'Artist - Title' lines, or try --identify.")
-        return 1
+    if why and not early:
+        console.print(f"[yellow]Identifying songs from the audio[/] [dim]({esc(why)})[/]")
+        with IdentifyProgress() as ip:
+            maybe, id_complete = await identify_into(tl, args.url, work, ic, ip.on_audio, ip.on_clips)
+        identify_notes()
+
     tracks = tl.tracks
-    if keep:
-        tracks = [t for t in tl.tracks if t.index in keep]
-        if not tracks:
-            console.print(f"[red]--only {esc(args.only)} matches none of the {len(tl.tracks)} tracks.[/]")
+    if not early:
+        tracklist_table(tl)
+        if args.dry_run:
+            if why and id_complete and not args.keep_audio:
+                shutil.rmtree(work, ignore_errors=True)
+            if not tl.tracks:
+                console.print(no_tracks)
+                return 1
+            return 0
+        write_tracklist()
+        if not tl.tracks:
+            console.print(no_tracks)
             return 1
+        if keep:
+            tracks = [t for t in tl.tracks if t.index in keep]
+            if not tracks:
+                console.print(f"[red]--only {esc(args.only)} matches none of the {len(tl.tracks)} tracks.[/]")
+                return 1
 
+    from .engine import Fetched, file_no_on_disk, renumber
+    from .identify import song_key
     from .soulseek import Downloader
+    from .tracklist import Track
+    from .ui import Board
     eng = Engine(cfg, None)                    # fails early (no ffmpeg...) before anything connects
     dl = Downloader(cfg, os.path.expandvars(os.path.expanduser(cfg["download_dir"])))
     with console.status(f"Connecting to Soulseek as {cfg['soulseek']['username']}…"):
@@ -285,27 +300,77 @@ async def run(args) -> int:
             console.print(f"[yellow]Soulseek login failed ({esc(str(e))}); using YouTube/SoundCloud only.[/]")
             dl = None
     results = {}
+
+    def hook(ui):
+        eng.on_status = ui.status
+        if dl:
+            dl.on_status = ui.status
+
+    async def one(ui, t) -> Fetched:
+        try:
+            r = await eng.fetch(t, out_dir)
+        except Exception as e:
+            log.debug("[%02d] error", t.index, exc_info=True)
+            r = Fetched(None, None, "", f"error: {e}")
+        if r.path:
+            note = os.path.splitext(r.path)[1].lstrip(".") + (" +mp3" if r.mp3 else "") + (SITES[r.source].tag if r.source in SITES else "")
+            ui.status(t.index, "skip" if r.source == "cache" else "done", note=note)
+        else:
+            ui.status(t.index, "missing", note=r.msg)
+        return r
+
     try:
         eng.dl = dl
-        with DownloadProgress(tracks) as ui:
-            eng.on_status = ui.status
-            if dl:
-                dl.on_status = ui.status
+        if early:
+            console.print(f"[yellow]Identifying songs from the audio[/] [dim]({esc(why)}); "
+                          "each song downloads as soon as it is recognised[/]")
+            # rows are keyed by the order songs turn up; files get their final number at the end
+            rows: dict[str, tuple[Track, asyncio.Task]] = {}
+            with Board() as board:
+                hook(board.dl)
 
-            async def one(t):
+                def start(t, final: bool = False) -> Track:
+                    k = song_key(t)
+                    if k not in rows:
+                        row = Track(len(rows) + 1, t.artist, t.title, t.start, t.length,
+                                    file_no=t.index if final else file_no_on_disk(out_dir, t))
+                        board.dl.add(row, num=f"{t.index:02d}" if final else "··")
+                        rows[k] = (row, asyncio.create_task(one(board.dl, row)))
+                    return rows[k][0]
+
+                for t in tl.tracks:            # the songs the tracklist already names go first
+                    start(t)
                 try:
-                    r = await eng.fetch(t, out_dir)
-                except Exception as e:
-                    log.debug("[%02d] error", t.index, exc_info=True)
-                    from .engine import Fetched
-                    r = Fetched(None, None, "", f"error: {e}")
-                results[t.index] = r
-                if r.path:
-                    note = os.path.splitext(r.path)[1].lstrip(".") + (" +mp3" if r.mp3 else "") + (SITES[r.source].tag if r.source in SITES else "")
-                    ui.status(t.index, "skip" if r.source == "cache" else "done", note=note)
-                else:
-                    ui.status(t.index, "missing", note=r.msg)
-            await asyncio.gather(*(one(t) for t in tracks))
+                    maybe, id_complete = await identify_into(tl, args.url, work, ic, board.id.on_audio,
+                                                             board.id.on_clips, on_track=start)
+                except BaseException:
+                    for _, task in rows.values():
+                        task.cancel()
+                    await asyncio.gather(*(task for _, task in rows.values()), return_exceptions=True)
+                    raise
+                board.id.note(f"done · {len(tl.tracks)} tracks" if id_complete
+                              else "[yellow]stopped early: Shazam kept rate-limiting[/]")
+                tracks = tl.tracks
+                for t in tracks:               # the final numbers; and any song the merge kept but never announced
+                    board.dl.number(start(t, final=True).index, t.index)
+                await asyncio.gather(*(task for _, task in rows.values()))
+            for t in tracks:
+                row, task = rows[song_key(t)]
+                results[t.index] = renumber(out_dir, row, t, task.result())
+            extra = [row for k, (row, _) in rows.items() if k not in {song_key(t) for t in tracks}]
+            if extra:                          # a near-duplicate the final merge dropped
+                log.info("not in the final tracklist, left as is: %s", ", ".join(r.label for r in extra))
+            identify_notes()
+            tracklist_table(tl)
+            if not tracks:
+                console.print(no_tracks)
+                return 1
+            write_tracklist()
+        else:
+            with DownloadProgress(tracks) as ui:
+                hook(ui)
+                got = await asyncio.gather(*(one(ui, t) for t in tracks))
+            results = {t.index: r for t, r in zip(tracks, got)}
     finally:
         if dl:
             with console.status("Disconnecting…"):

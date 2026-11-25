@@ -325,12 +325,13 @@ def listed_spans(tracks: list[Track], hold: int = 180, margin: int = 15) -> list
 async def scan(audio: str, duration: int, step: int, parallel: int = 3,
                progress=lambda done, total, matches, wait=0: None, fallbacks: list | None = None,
                cache: str | None = None, skip: list[tuple[int, int]] | None = None,
-               refine: bool = True) -> tuple[list[Hit], bool]:
+               refine: bool = True, on_hit=lambda hit: None) -> tuple[list[Hit], bool]:
     """Fingerprint a clip every `step` seconds with Shazam, then (for a coarse step) a clip half-way
     between neighbours that disagree or both missed, which is where one song turns into the next.
     Stretches in `skip` (already in the tracklist) aren't sampled. Clips Shazam misses go to the
     keyed fallbacks. Every answer is saved to `cache`, so an interrupted scan picks up where it was.
     progress(done, total, matches, wait) gets wait > 0 while Shazam is rate-limiting us.
+    on_hit(hit) hears each match as it comes in (cached ones too).
     Returns (hits, complete); complete is False when Shazam kept refusing and the scan stopped early."""
     import aiohttp
     ffmpeg = find_ffmpeg()
@@ -388,6 +389,10 @@ async def scan(audio: str, duration: int, step: int, parallel: int = 3,
         if found and found[0] and found[1]:
             hits[at] = Hit(at, found[0], found[1])
             seen[at] = hits[at].key
+            try:
+                on_hit(hits[at])
+            except Exception:                   # a listener's bug mustn't stop the scan
+                log.debug("on_hit failed", exc_info=True)
         else:
             seen[at] = None
 
@@ -488,20 +493,28 @@ def hits_to_tracks(hits: list[Hit], min_hits: int, duration: int) -> tuple[list[
     return tracks, maybe
 
 
+def _close(x: str, y: str, need: float) -> bool:
+    wx, wy = set(norm(x).split()), set(norm(y).split())
+    return bool(wx and wy) and len(wx & wy) / min(len(wx), len(wy)) >= need
+
+
+def same_song(a: Track, b: Track) -> bool:
+    """Probably the same song. "Intro" by two different artists are two songs; an unknown artist
+    ("ID") can't tell them apart."""
+    unknown = lambda t: not norm(t.artist) or norm(t.artist) in ("id", "unknown")
+    return _close(a.title, b.title, 0.6) and (unknown(a) or unknown(b) or _close(a.artist, b.artist, 0.5))
+
+
+def song_key(t) -> str:
+    """The key identification groups matches by (Hit.key), for a Track too."""
+    return norm(f"{t.artist} {t.title}")
+
+
 def merge(listed: list[Track], found: list[Track]) -> list[Track]:
     """Combine a partial tracklist with identified tracks, dropping duplicates."""
-    def close(x: str, y: str, need: float) -> bool:
-        wx, wy = set(norm(x).split()), set(norm(y).split())
-        return bool(wx and wy) and len(wx & wy) / min(len(wx), len(wy)) >= need
-
-    def same(a: Track, b: Track) -> bool:
-        # "Intro" by two different artists are two songs; an unknown artist ("ID") can't tell them apart
-        unknown = lambda t: not norm(t.artist) or norm(t.artist) in ("id", "unknown")
-        return close(a.title, b.title, 0.6) and (unknown(a) or unknown(b) or close(a.artist, b.artist, 0.5))
-
     out = list(listed)
     for f in found:
-        if not any(same(f, t) for t in out):
+        if not any(same_song(f, t) for t in out):
             out.append(f)
     out.sort(key=lambda t: (t.start is None, t.start or 0))
     for i, t in enumerate(out):

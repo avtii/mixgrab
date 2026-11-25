@@ -16,7 +16,7 @@ from typing import Optional
 
 from . import youtube
 from .identify import find_ffmpeg
-from .soulseek import LOSSLESS, PARTIAL, STATUS_CB, Downloader, track_prefix
+from .soulseek import LOSSLESS, PARTIAL, STATUS_CB, Downloader, safe_name, track_prefix
 from .tracklist import Track
 
 log = logging.getLogger("mixgrab")
@@ -76,6 +76,48 @@ def existing(out_dir: str, t: Track) -> Optional[tuple[str, Optional[str], str]]
     mp3 = next((n for n in mine if ext(n) == "mp3"), None)
     main = mp3 or mine[0]
     return j(main), None, "cache"
+
+
+def _files_of(out_dir: str, prefix: str) -> list[str]:
+    """A track's finished files: 'prefix.ext' and 'prefix [YT].ext' style names."""
+    try:
+        names = os.listdir(out_dir)
+    except OSError:
+        return []
+    starts = tuple(prefix + tg + "." for tg in ("",) + tuple(youtube.TAGS))
+    return [n for n in names if n.startswith(starts) and not n.endswith(PARTIAL) and ".yt." not in n]
+
+
+def file_no_on_disk(out_dir: str, t: Track) -> int:
+    """The number an earlier run gave this song's file ('07 - Artist - Title.flac' -> 7), or 0.
+    A download that starts before the final numbering is known reuses it, so it is found, not fetched again."""
+    import re
+    pat = re.compile(r"(\d+) - " + re.escape(safe_name(t.label)) + r"(?: \[[A-Z]{2}\])?\.")
+    try:
+        names = sorted(os.listdir(out_dir))
+    except OSError:
+        return 0
+    for n in names:
+        m = pat.match(n)
+        if m and not n.endswith(PARTIAL) and ".yt." not in n and _nonempty(os.path.join(out_dir, n)):
+            return int(m.group(1))
+    return 0
+
+
+def renumber(out_dir: str, early: Track, final: Track, r: "Fetched") -> "Fetched":
+    """Move a download started under a provisional number to its final one ('00 - X.flac' -> '07 - X.flac')."""
+    old, new = track_prefix(early), track_prefix(final)
+    if not r.path or old == new:
+        return r
+    moved = {}
+    for n in _files_of(out_dir, old):
+        src, dst = os.path.join(out_dir, n), os.path.join(out_dir, new + n[len(old):])
+        try:
+            os.replace(src, dst)
+            moved[src] = dst
+        except OSError as e:
+            log.warning("couldn't rename %s: %s", n, e)
+    return Fetched(moved.get(r.path, r.path), moved.get(r.mp3, r.mp3) if r.mp3 else None, r.source, r.msg)
 
 
 class Engine:
@@ -244,13 +286,33 @@ def identify_reason(tl, mode: str, ic: dict) -> Optional[str]:
 
 async def identify_into(tl, url: str, work: str, ic: dict,
                         on_audio=lambda done, total: None,
-                        on_clips=lambda done, total, matches, wait=0: None) -> tuple[list, bool]:
+                        on_clips=lambda done, total, matches, wait=0: None,
+                        on_track=None) -> tuple[list, bool]:
     """Download the mix audio, fingerprint it and merge confident matches into tl.tracks.
     Answers are kept in `work`, so running again after an interruption resumes the scan.
+    on_track(Track) hears each song the moment it is confident (heard min_hits times) and not
+    already in the tracklist, so it can be downloaded while the scan goes on; index is 0 there,
+    the final numbers come with the merged tl.tracks.
     Returns (low-confidence hits heard only once, complete). complete is False when Shazam kept
     rate-limiting and the scan stopped early; running again continues it."""
     import json
-    from .identify import download_audio, hits_to_tracks, listed_spans, merge, recognizers, scan
+    from .identify import download_audio, hits_to_tracks, listed_spans, merge, recognizers, same_song, scan
+    listed = list(tl.tracks)
+    try:
+        need = max(1, int(ic.get("min_hits", 2)))
+    except (TypeError, ValueError):
+        need = 2
+    heard: dict[str, list] = {}
+
+    def on_hit(h):
+        hs = heard.setdefault(h.key, [])
+        hs.append(h)
+        if on_track and len(hs) == need:
+            first = min(hs, key=lambda x: x.at)
+            t = Track(0, first.artist, first.title, first.at)
+            if not any(same_song(t, l) for l in listed):
+                on_track(t)
+
     audio = await asyncio.to_thread(download_audio, url, work, on_audio)
     duration = tl.duration or await asyncio.to_thread(probe_duration, audio)
     if not duration:                                   # one clip at 0:00 would identify nothing
@@ -262,7 +324,7 @@ async def identify_into(tl, url: str, work: str, ic: dict,
     except (TypeError, ValueError):
         step = 90
     hits, complete = await scan(audio, duration, step, progress=on_clips, fallbacks=recognizers(ic),
-                      cache=os.path.join(work, "clips.json"), skip=listed_spans(tl.tracks))
+                      cache=os.path.join(work, "clips.json"), skip=listed_spans(tl.tracks), on_hit=on_hit)
     with open(os.path.join(work, "hits.json"), "w", encoding="utf-8") as f:
         json.dump([h.__dict__ for h in hits], f, indent=1, ensure_ascii=False)
     found, maybe = hits_to_tracks(hits, ic.get("min_hits", 2), duration)
