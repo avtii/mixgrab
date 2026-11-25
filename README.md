@@ -150,7 +150,8 @@ Recent Chrome versions on Windows encrypt their cookies, so `--cookies-from-brow
    - each clip goes to Shazam, then to ACRCloud and AudD if you've added their keys to the config;
    - Shazam requests are spaced out. If Shazam says "too many requests", mixgrab pauses and shows how long it is waiting;
    - answers are saved as they come in, so running the same command again after an interruption carries on from there;
-   - a song counts only if at least 2 clips match it. Songs heard only once are listed but not downloaded.
+   - a song counts only if at least 2 clips match it. Songs heard only once are listed but not downloaded;
+   - downloads don't wait for the scan: songs the tracklist already names start right away, and each identified song starts as soon as its second clip matches. The track rows appear above the identification bar, marked `··` until the scan ends and the final numbers are known; the files are then renamed to those numbers. With `--only` (which picks by final number) mixgrab identifies first and downloads after.
 
 ## How tracks are downloaded
 1. **Soulseek**. Results are scored on:

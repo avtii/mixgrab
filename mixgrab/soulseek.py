@@ -176,7 +176,7 @@ def safe_name(s: str) -> str:
 
 
 def track_prefix(t: Track) -> str:
-    return f"{t.index:02d} - {safe_name(t.label)}"
+    return f"{t.index if t.file_no is None else t.file_no:02d} - {safe_name(t.label)}"
 
 
 PARTIAL = (".part", ".tmp", ".ytdl")      # files still being written

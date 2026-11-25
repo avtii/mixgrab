@@ -26,6 +26,9 @@ class Track:
     title: str
     start: Optional[int] = None      # seconds into the mix
     length: Optional[int] = None     # approximate length in seconds
+    # the number in the file name when it differs from index (a download started before the final
+    # numbering was known); None means index
+    file_no: Optional[int] = field(default=None, compare=False, repr=False)
 
     @property
     def label(self) -> str:

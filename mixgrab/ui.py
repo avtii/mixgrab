@@ -37,19 +37,28 @@ def tracklist_table(tl: Tracklist) -> None:
 
 
 class IdentifyProgress:
-    def __init__(self):
+    def __init__(self, live: bool = True):
         self.p = Progress(TextColumn("{task.description}"), BarColumn(bar_width=30),
                           TaskProgressColumn(), TextColumn("[dim]{task.fields[info]}"),
                           console=console, transient=False)
+        self.live = live                # False: a Board draws it, under the downloads
         self.audio = self.clips = None
 
     def __enter__(self):
-        self.p.start()
+        if self.live:
+            self.p.start()
         self.audio = self.p.add_task("Fetching mix audio ", total=None, info="")
         return self
 
     def __exit__(self, *exc):
-        self.p.stop()
+        if self.live:
+            self.p.stop()
+
+    def note(self, text: str):
+        """A word on the identification line once it is over (the downloads go on above it)."""
+        if self.clips is None:
+            self.clips = self.p.add_task("Identifying songs  ", total=None, info="")
+        self.p.update(self.clips, info=text)
 
     def on_audio(self, done, total):
         self.p.update(self.audio, completed=done, total=total or None,
@@ -92,7 +101,7 @@ class _TrackOnly(ProgressColumn):
 
 
 class DownloadProgress:
-    def __init__(self, tracks):
+    def __init__(self, tracks, live: bool = True):
         self.p = Progress(
             TextColumn("{task.fields[num]}", style="dim"),
             TextColumn("{task.fields[name]}", style="bold", markup=False),
@@ -106,22 +115,39 @@ class DownloadProgress:
             console=console, expand=False, refresh_per_second=4,
         )
         self.tasks = {}
-        self.tracks = tracks
-        self.width = min(max((len(t.label) for t in tracks), default=20), 34)
+        self.tracks = list(tracks)
+        self.live = live                # False: a Board draws it, above the identification line
+        # tracks still to come (found while identifying) get the widest column
+        self.width = min(max((len(t.label) for t in tracks), default=20), 34) if tracks else 34
 
     def __enter__(self):
-        self.p.start()
-        self.overall = self.p.add_task("", total=len(self.tracks), num="  ", name="All".ljust(self.width),
+        if self.live:
+            self.p.start()
+        self.overall = self.p.add_task("", total=0, num="  ", name="All".ljust(self.width),
                                        state="", note="")
         for t in self.tracks:
-            name = t.label if len(t.label) <= self.width else t.label[: self.width - 1] + "…"
-            self.tasks[t.index] = self.p.add_task("", total=None, start=False, num=f"{t.index:02d}",
-                                                  name=name.ljust(self.width),
-                                                  state=STATE_STYLE["pending"], note="")
+            self.add(t)
         return self
 
     def __exit__(self, *exc):
-        self.p.stop()
+        if self.live:
+            self.p.stop()
+
+    def add(self, t, num: str | None = None):
+        """A row for track t, keyed by t.index; num is what the first column shows (its number by default)."""
+        name = t.label if len(t.label) <= self.width else t.label[: self.width - 1] + "…"
+        self.tasks[t.index] = self.p.add_task("", total=None, start=False,
+                                              num=num if num is not None else f"{t.index:02d}",
+                                              name=name.ljust(self.width),
+                                              state=STATE_STYLE["pending"], note="")
+        overall = next(x for x in self.p.tasks if x.id == self.overall)
+        self.p.update(self.overall, total=(overall.total or 0) + 1)
+
+    def number(self, idx, n: int):
+        """Show the final track number on a row that started without one."""
+        tid = self.tasks.get(idx)
+        if tid is not None:
+            self.p.update(tid, num=f"{n:02d}")
 
     def status(self, idx, state, **i):
         tid = self.tasks.get(idx)
@@ -160,6 +186,28 @@ class DownloadProgress:
         self.p.update(tid, **upd)
         if state in ("done", "skip", "missing"):
             self.p.advance(self.overall)
+
+
+class Board:
+    """One live display: the track downloads on top, the identification line under them."""
+
+    def __init__(self):
+        from rich.console import Group
+        from rich.live import Live
+        self.dl = DownloadProgress([], live=False)
+        self.id = IdentifyProgress(live=False)
+        self.live = Live(Group(self.dl.p, self.id.p), console=console, refresh_per_second=4)
+
+    def __enter__(self):
+        self.dl.__enter__()
+        self.id.__enter__()
+        self.live.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.live.stop()
+        if not console.is_terminal:     # rich ends the last line itself only on a terminal
+            console.line()
 
 
 def summary(tracks, results, out_dir) -> None:
