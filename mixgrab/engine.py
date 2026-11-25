@@ -131,10 +131,19 @@ class Engine:
     async def _site(self, site, t: Track, out_dir: str) -> tuple[Optional[str], str]:
         self._status(t.index, site.key)
         async with self.site_sem[site.key]:
-            try:
-                entry = await asyncio.to_thread(youtube.find, t, 8, site.key)
-            except Exception as e:
-                return None, f"search failed ({str(e)[:120]})"
+            entry, err = None, None
+            for attempt in range(3):                   # ride out a short network or DNS outage
+                try:
+                    entry, err = await asyncio.to_thread(youtube.find, t, 8, site.key), None
+                    break
+                except Exception as e:
+                    err = e
+                    log.debug("[%02d] %s search attempt %d failed", t.index, site.name, attempt + 1, exc_info=True)
+                    if attempt == 2 or not transient(e):
+                        break
+                    await asyncio.sleep((5, 20)[attempt])
+            if err:
+                return None, f"search failed ({offline_hint(err)})"
             if not entry:
                 return None, "no match"
             busy = lambda done, total: self._status(t.index, "downloading", done=done, total=total,
@@ -156,7 +165,7 @@ class Engine:
                         break                          # no point waiting to fail the same way again
                     await asyncio.sleep(5 * (attempt + 1))
             if not path:
-                return None, f"download failed ({str(err)[:120]})"
+                return None, f"download failed ({offline_hint(err)})"
         return path, f"{site.name}: {entry.get('title')} ({entry.get('channel') or entry.get('uploader')})"
 
     async def _maybe_mp3(self, t: Track, path: str) -> Optional[str]:
@@ -175,12 +184,23 @@ class Engine:
 _TRANSIENT = ("timed out", "timeout", "connection", "temporarily", "reset by peer", "incompleteread",
               "http error 5", "http error 429", "too many requests", "unable to download", "network",
               "eof occurred", "remote end closed", "fragment")
+# a failed name lookup: the connection or the router's DNS dropped for a moment
+_DNS = ("getaddrinfo", "name resolution", "nodename nor servname", "name or service not known",
+        "no address associated")
 
 
 def transient(e: BaseException) -> bool:
     """Worth retrying (network trouble), as opposed to a private/removed video, a bot check or bad settings."""
     s = str(e).lower()
-    return any(w in s for w in _TRANSIENT)
+    return any(w in s for w in _TRANSIENT + _DNS)
+
+
+def offline_hint(e: BaseException) -> str:
+    """The error for a track's status; for a failed name lookup, say what it means."""
+    s = str(e)
+    if any(w in s.lower() for w in _DNS):
+        return "no internet: couldn't look up the site's address"
+    return s.replace("ERROR: ", "")[:120]
 
 
 def find_ffprobe(ffmpeg: str) -> Optional[str]:
